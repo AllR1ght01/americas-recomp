@@ -146,7 +146,7 @@ static void CheckSystem() {
   system.At<void (*)(void*, BOOLEAN)>(8, "XSystemAllowFullDownloadBandwidth")(system.self, FALSE);
   Check(true, "XSystemAllowFullDownloadBandwidth accepts the hint");
   HRESULT track = system.At<HRESULT (*)(void*, void*, void*)>(6, "XSystemHandleTrack")(system.self, nullptr, nullptr);
-  Check(track == E_NOTIMPL, "XSystemHandleTrack stays failing");
+  Check(track == S_OK, "XSystemHandleTrack accepts a null callback (tracking callback off; test_misc.cpp checks tracking)");
 }
 
 static void CheckLauncher() {
@@ -163,8 +163,8 @@ static void CheckLauncher() {
   close(launcher.self, second);
   close(launcher.self, nullptr);
   Check(true, "XDisplayCloseTimeoutDeferralHandle releases handles and ignores null");
-  HRESULT launch = launcher.At<HRESULT (*)(void*, void*, const char*)>(3, "XLaunchUri")(launcher.self, nullptr, "https://example.invalid/");
-  Check(launch == E_NOTIMPL, "XLaunchUri stays failing");
+  HRESULT launch = launcher.At<HRESULT (*)(void*, void*, const char*)>(3, "XLaunchUri")(launcher.self, nullptr, "not a uri");
+  Check(launch == E_INVALIDARG, "XLaunchUri rejects text without a URI scheme (test_launch.cpp checks launching)");
 }
 
 struct HdrInfo { float minLuminance, maxLuminance, maxFullFrameLuminance; };
@@ -228,12 +228,12 @@ static void CheckErrorAndDisplay() {
 static void CheckFeatures() {
   Api feature = Get(kFeature);
   auto available = feature.At<BOOLEAN (*)(void*, uint32_t)>(3, "XGameRuntimeIsFeatureAvailable");
-  const uint32_t expectedOn[] = {0, 2, 3, 4, 7, 11, 12, 15, 16, 17, 18, 19, 20, 21};
-  const uint32_t expectedOff[] = {1, 5, 9, 13, 14, 22, 0xffffffffu};
+  const uint32_t expectedOn[] = {0, 2, 3, 4, 5, 7, 9, 11, 12, 15, 16, 17, 18, 19, 20, 21};
+  const uint32_t expectedOff[] = {1, 13, 14, 22, 0xffffffffu};
   bool on = true, off = true;
   for (uint32_t f : expectedOn) on = on && available(feature.self, f);
   for (uint32_t f : expectedOff) off = off && !available(feature.self, f);
-  Check(on, "XGameRuntimeIsFeatureAvailable reports implemented features (XAsync, XAsyncProvider, XDisplay, XGameSave, XPackage, XPersistentLocalStorage, XSystem, XTaskQueue, XThread, XUser, XError, XGameEvent)");
+  Check(on, "XGameRuntimeIsFeatureAvailable reports implemented features (XAsync, XAsyncProvider, XDisplay, XGame, XGameSave, XLauncher, XPackage, XPersistentLocalStorage, XSystem, XTaskQueue, XThread, XUser, XError, XGameEvent)");
   Check(off, "XGameRuntimeIsFeatureAvailable reports unimplemented and unknown features as unavailable");
   Check(available(feature.self, 6) && available(feature.self, 8) && available(feature.self, 10),
         "XGameRuntimeIsFeatureAvailable follows the override table (XGameInvite, XGameUI, XNetworking)");
@@ -245,7 +245,7 @@ static void CheckActivation() {
   Api activation = Get(kActivation);
   CheckSilentEvent(activation, 3, "XGameActivationRegisterForEvent", 4, "XGameActivationUnregisterForEvent");
   HRESULT accept = activation.At<HRESULT (*)(void*, const char*)>(5, "XGameActivationAcceptPendingInvite")(activation.self, "ms-xbl-0://invite");
-  Check(accept == E_NOTIMPL, "XGameActivationAcceptPendingInvite stays failing");
+  Check(accept == HRESULT_FROM_WIN32(ERROR_NOT_FOUND), "XGameActivationAcceptPendingInvite reports no such pending invite");
   Api invite = Get(kInvite);
   CheckSilentEvent(invite, 3, "XGameInviteRegisterForEvent", 4, "XGameInviteUnregisterForEvent");
   CheckSilentEvent(invite, 5, "XGameInviteRegisterForPendingEvent", 6, "XGameInviteUnregisterForPendingEvent");

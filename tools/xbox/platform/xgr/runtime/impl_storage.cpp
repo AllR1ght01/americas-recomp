@@ -138,6 +138,12 @@ const Override kOverrides[] = {
 
 }  // namespace
 
+bool directory(std::string* path) {
+  if (!quota_bytes() || root().empty()) return false;
+  *path = root();
+  return true;
+}
+
 const Override* overrides(size_t* count) {
   *count = sizeof(kOverrides) / sizeof(kOverrides[0]);
   return kOverrides;

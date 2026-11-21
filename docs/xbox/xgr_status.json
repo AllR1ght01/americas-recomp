@@ -154,7 +154,7 @@ true
 ],
 [
 "XAppCaptureTakeScreenshot",
-false
+true
 ],
 [
 "XAppCaptureOpenScreenshotStream",
@@ -330,7 +330,7 @@ true
 "IXLauncherImpl": [
 [
 "XLaunchUri",
-false
+true
 ],
 [
 "XDisplayAcquireTimeoutDeferral",
@@ -360,13 +360,13 @@ true
 "IXGameImpl2": [
 [
 "XLaunchNewGame",
-false
+true
 ]
 ],
 "IXGameImpl3": [
 [
 "XLaunchRestartOnCrash",
-false
+true
 ]
 ],
 "IXGameActivationImpl": [
@@ -380,7 +380,7 @@ true
 ],
 [
 "XGameActivationAcceptPendingInvite",
-false
+true
 ]
 ],
 "IXGameEventImpl": [
@@ -410,7 +410,7 @@ true
 ],
 [
 "XGameInviteAcceptPendingInvite",
-false
+true
 ]
 ],
 "IXGameProtocolImpl": [
@@ -758,19 +758,19 @@ true
 ],
 [
 "XGameUiShowWebAuthenticationAsync",
-false
+true
 ],
 [
 "XGameUiShowWebAuthenticationResultSize",
-false
+true
 ],
 [
 "XGameUiShowWebAuthenticationResult",
-false
+true
 ],
 [
 "XGameUiShowWebAuthenticationWithOptionsAsync",
-false
+true
 ]
 ],
 "IXGameUiImpl2": [
@@ -820,39 +820,39 @@ false
 "IXGameUiImpl4": [
 [
 "XGameUiSetUiCallbacks",
-false
+true
 ],
 [
 "XGameUiSetMessageDialogUiResponse",
-false
+true
 ],
 [
 "XGameUiSetPlayerPickerUiResponse",
-false
+true
 ],
 [
 "XGameUiSetTextEntryUiResponse",
-false
+true
 ],
 [
 "XGameUiSetPlayerProfileCardUiResponse",
-false
+true
 ],
 [
 "XGameUiSetSendGameInviteUiResponse",
-false
+true
 ],
 [
 "XGameUiSetAchievementsUiResponse",
-false
+true
 ],
 [
 "XGameUiSetMultiplayerActivityGameInviteUiResponse",
-false
+true
 ],
 [
 "XGameUiSetErrorDialogUiResponse",
-false
+true
 ]
 ],
 "IXNetworkingImpl": [
@@ -998,7 +998,7 @@ true
 ],
 [
 "XPackageUninstallChunks",
-false
+true
 ],
 [
 "XPackageUnregisterPackageInstalled",
@@ -1100,7 +1100,7 @@ false
 "IXPersistentLocalStorageImpl3": [
 [
 "XPersistentLocalStorageMountForPackage",
-false
+true
 ]
 ],
 "IXStoreImpl": [
@@ -1444,11 +1444,11 @@ true
 "IXSystemImpl3": [
 [
 "XSystemHandleTrack",
-false
+true
 ],
 [
 "XSystemIsHandleValid",
-false
+true
 ]
 ],
 "IXSystemImpl4": [

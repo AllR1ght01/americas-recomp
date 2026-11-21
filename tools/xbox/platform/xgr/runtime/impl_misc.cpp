@@ -14,8 +14,18 @@ HRESULT XGameEventWrite_impl(void*, void* user, const char* serviceConfigId, con
   return S_OK;
 }
 
+HRESULT accept_pending_invite(const char* inviteUri) {
+  if (!inviteUri || !*inviteUri) return E_INVALIDARG;
+  return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+HRESULT XGameActivationAcceptPendingInvite_impl(void*, const char* inviteUri) { return accept_pending_invite(inviteUri); }
+HRESULT XGameInviteAcceptPendingInvite_impl(void*, const char* inviteUri) { return accept_pending_invite(inviteUri); }
+
 const Override kOverrides[] = {
     {"XGameEventWrite", reinterpret_cast<void*>(&XGameEventWrite_impl)},
+    {"XGameActivationAcceptPendingInvite", reinterpret_cast<void*>(&XGameActivationAcceptPendingInvite_impl)},
+    {"XGameInviteAcceptPendingInvite", reinterpret_cast<void*>(&XGameInviteAcceptPendingInvite_impl)},
 };
 
 }  // namespace

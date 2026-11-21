@@ -9,11 +9,17 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "gtx/log.h"
 #include "xgr_internal.h"
 #include "xtask.h"
+#include "handles.h"
+#include "ui.h"
 
 namespace gtx::xgr::system {
 namespace {
@@ -49,11 +55,13 @@ HRESULT XDisplayAcquireTimeoutDeferral_impl(void*, DisplayTimeoutDeferral** out)
     return hr;
   }
   *out = new DisplayTimeoutDeferral{request};
+  handles::opened(*out, handles::Type::DisplayTimeoutDeferral);
   return S_OK;
 }
 
 void XDisplayCloseTimeoutDeferralHandle_impl(void*, DisplayTimeoutDeferral* deferral) {
   if (!deferral) return;
+  handles::closed(deferral);
   PowerClearRequest(deferral->powerRequest, PowerRequestDisplayRequired);
   CloseHandle(deferral->powerRequest);
   delete deferral;
@@ -327,7 +335,6 @@ struct FeatureRequirement {
 
 const FeatureRequirement kFeatureRequirements[] = {
     {0, {"XClosedCaptionGetProperties", "XHighContrastGetMode"}},
-    {1, {"XAppCaptureTakeScreenshot"}},
     {2, {"XAsyncGetStatus", "XAsyncGetResultSize", "XAsyncCancel", "XAsyncRun", "XAsyncGetResult"}},
     {3, {"XAsyncBegin", "XAsyncSchedule", "XAsyncComplete", "XAsyncGetResult"}},
     {4, {"XDisplayAcquireTimeoutDeferral", "XDisplayCloseTimeoutDeferralHandle", "XDisplayTryEnableHdrMode"}},
@@ -383,57 +390,123 @@ HRESULT result_without_payload(task::AsyncBlock* async, const void* identity) {
   return task::AsyncGetResult(async, identity, 0, nullptr, nullptr);
 }
 
-HRESULT XGameUiShowMessageDialogAsync_impl(void*, task::AsyncBlock* async, const char* title, const char* content, const char*,
-                                           const char*, const char*, uint32_t, uint32_t) {
+std::optional<std::string> keep(const char* text) {
+  if (!text) return std::nullopt;
+  return std::string(text);
+}
+
+const char* text_of(const std::optional<std::string>& text) { return text ? text->c_str() : nullptr; }
+
+HRESULT XGameUiShowMessageDialogAsync_impl(void*, task::AsyncBlock* async, const char* title, const char* content, const char* first,
+                                           const char* second, const char* third, uint32_t defaultButton, uint32_t cancelButton) {
   if (!async || !title || !content) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowMessageDialogAsync_impl), "XGameUiShowMessageDialogAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowMessageDialogAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showMessageDialog) return begin_without_ui(async, identity, "XGameUiShowMessageDialogAsync");
+  auto show = [callbacks, title = std::string(title), content = std::string(content), first = keep(first), second = keep(second),
+               third = keep(third), defaultButton, cancelButton](void* handle, task::Queue* queue) {
+    callbacks.showMessageDialog(handle, queue, title.c_str(), content.c_str(), text_of(first), text_of(second), text_of(third), defaultButton,
+                                cancelButton, callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowMessageDialogAsync", ui::Request::MessageDialog, show);
 }
 HRESULT XGameUiShowMessageDialogResult_impl(void*, task::AsyncBlock* async, uint32_t* button) {
   if (!button) return E_INVALIDARG;
-  return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowMessageDialogAsync_impl));
+  return task::AsyncGetResult(async, reinterpret_cast<const void*>(&XGameUiShowMessageDialogAsync_impl), sizeof(*button), button, nullptr);
 }
 
 HRESULT XGameUiShowSendGameInviteAsync_impl(void*, task::AsyncBlock* async, void* user, const char* scid, const char* templateName,
-                                            const char* sessionId, const char*, const char*) {
+                                            const char* sessionId, const char* invitationText, const char* customActivationContext) {
   if (!async || !user || !scid || !templateName || !sessionId) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowSendGameInviteAsync_impl), "XGameUiShowSendGameInviteAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowSendGameInviteAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showSendGameInvite) return begin_without_ui(async, identity, "XGameUiShowSendGameInviteAsync");
+  auto show = [callbacks, user, scid = std::string(scid), templateName = std::string(templateName), sessionId = std::string(sessionId),
+               invitationText = keep(invitationText), customActivationContext = keep(customActivationContext)](void* handle, task::Queue* queue) {
+    callbacks.showSendGameInvite(handle, queue, user, scid.c_str(), templateName.c_str(), sessionId.c_str(), text_of(invitationText),
+                                 text_of(customActivationContext), callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowSendGameInviteAsync", ui::Request::SendGameInvite, show);
 }
 HRESULT XGameUiShowSendGameInviteResult_impl(void*, task::AsyncBlock* async) {
   return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowSendGameInviteAsync_impl));
 }
 
-HRESULT XGameUiShowPlayerProfileCardAsync_impl(void*, task::AsyncBlock* async, void* user, uint64_t) {
+HRESULT XGameUiShowPlayerProfileCardAsync_impl(void*, task::AsyncBlock* async, void* user, uint64_t targetPlayer) {
   if (!async || !user) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowPlayerProfileCardAsync_impl), "XGameUiShowPlayerProfileCardAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowPlayerProfileCardAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showPlayerProfileCard) return begin_without_ui(async, identity, "XGameUiShowPlayerProfileCardAsync");
+  auto show = [callbacks, user, targetPlayer](void* handle, task::Queue* queue) {
+    callbacks.showPlayerProfileCard(handle, queue, user, targetPlayer, callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowPlayerProfileCardAsync", ui::Request::PlayerProfileCard, show);
 }
 HRESULT XGameUiShowPlayerProfileCardResult_impl(void*, task::AsyncBlock* async) {
   return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowPlayerProfileCardAsync_impl));
 }
 
-HRESULT XGameUiShowAchievementsAsync_impl(void*, task::AsyncBlock* async, void* user, uint32_t) {
+HRESULT XGameUiShowAchievementsAsync_impl(void*, task::AsyncBlock* async, void* user, uint32_t titleId) {
   if (!async || !user) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowAchievementsAsync_impl), "XGameUiShowAchievementsAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowAchievementsAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showAchievements) return begin_without_ui(async, identity, "XGameUiShowAchievementsAsync");
+  auto show = [callbacks, user, titleId](void* handle, task::Queue* queue) {
+    callbacks.showAchievements(handle, queue, user, titleId, callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowAchievementsAsync", ui::Request::Achievements, show);
 }
 HRESULT XGameUiShowAchievementsResult_impl(void*, task::AsyncBlock* async) {
   return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowAchievementsAsync_impl));
 }
 
 HRESULT XGameUiShowPlayerPickerAsync_impl(void*, task::AsyncBlock* async, void* user, const char* prompt, uint32_t selectFromCount,
-                                          const uint64_t* selectFrom, uint32_t, const uint64_t*, uint32_t, uint32_t) {
+                                          const uint64_t* selectFrom, uint32_t preSelectedCount, const uint64_t* preSelected, uint32_t minSelection,
+                                          uint32_t maxSelection) {
   if (!async || !user || !prompt || (selectFromCount && !selectFrom)) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowPlayerPickerAsync_impl), "XGameUiShowPlayerPickerAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowPlayerPickerAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showPlayerPicker) return begin_without_ui(async, identity, "XGameUiShowPlayerPickerAsync");
+  if (preSelectedCount && !preSelected) return E_INVALIDARG;
+  auto show = [callbacks, user, prompt = std::string(prompt), selectFrom = std::vector<uint64_t>(selectFrom, selectFrom + selectFromCount),
+               preSelected = std::vector<uint64_t>(preSelected, preSelected + preSelectedCount), minSelection,
+               maxSelection](void* handle, task::Queue* queue) {
+    ui::PlayerPickerInfo info{user,
+                              prompt.c_str(),
+                              static_cast<uint32_t>(selectFrom.size()),
+                              selectFrom.data(),
+                              static_cast<uint32_t>(preSelected.size()),
+                              preSelected.data(),
+                              minSelection,
+                              maxSelection};
+    callbacks.showPlayerPicker(handle, queue, &info, callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowPlayerPickerAsync", ui::Request::PlayerPicker, show);
 }
 HRESULT XGameUiShowPlayerPickerResultCount_impl(void*, task::AsyncBlock* async, uint32_t* count) {
   if (!count) return E_INVALIDARG;
-  return task::AsyncGetStatus(async, false);
+  size_t bytes = 0;
+  HRESULT hr = task::AsyncGetResultSize(async, &bytes);
+  if (SUCCEEDED(hr)) *count = static_cast<uint32_t>(bytes / sizeof(uint64_t));
+  return hr;
 }
-HRESULT XGameUiShowPlayerPickerResult_impl(void*, task::AsyncBlock* async, uint32_t, uint64_t*, uint32_t*) {
-  return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowPlayerPickerAsync_impl));
+HRESULT XGameUiShowPlayerPickerResult_impl(void*, task::AsyncBlock* async, uint32_t count, uint64_t* players, uint32_t* used) {
+  size_t bytes = 0;
+  HRESULT hr = task::AsyncGetResult(async, reinterpret_cast<const void*>(&XGameUiShowPlayerPickerAsync_impl), sizeof(uint64_t) * count, players,
+                                    &bytes);
+  if (SUCCEEDED(hr) && used) *used = static_cast<uint32_t>(bytes / sizeof(uint64_t));
+  return hr;
 }
 
-HRESULT XGameUiShowErrorDialogAsync_impl(void*, task::AsyncBlock* async, HRESULT, const char*) {
+HRESULT XGameUiShowErrorDialogAsync_impl(void*, task::AsyncBlock* async, HRESULT errorCode, const char* serviceContext) {
   if (!async) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowErrorDialogAsync_impl), "XGameUiShowErrorDialogAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowErrorDialogAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showErrorDialog) return begin_without_ui(async, identity, "XGameUiShowErrorDialogAsync");
+  auto show = [callbacks, errorCode, serviceContext = keep(serviceContext)](void* handle, task::Queue* queue) {
+    callbacks.showErrorDialog(handle, queue, errorCode, text_of(serviceContext), callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowErrorDialogAsync", ui::Request::ErrorDialog, show);
 }
 HRESULT XGameUiShowErrorDialogResult_impl(void*, task::AsyncBlock* async) {
   return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowErrorDialogAsync_impl));
@@ -443,16 +516,31 @@ HRESULT XGameUiSetNotificationPositionHint_impl(void*, uint32_t position) {
   return position <= 5 ? S_OK : E_INVALIDARG;
 }
 
-HRESULT XGameUiShowTextEntryAsync_impl(void*, task::AsyncBlock* async, const char*, const char*, const char*, uint32_t, uint32_t) {
+HRESULT XGameUiShowTextEntryAsync_impl(void*, task::AsyncBlock* async, const char* title, const char* description, const char* defaultText,
+                                       uint32_t inputScope, uint32_t maxTextLength) {
   if (!async) return E_INVALIDARG;
-  return begin_without_ui(async, reinterpret_cast<const void*>(&XGameUiShowTextEntryAsync_impl), "XGameUiShowTextEntryAsync");
+  const void* identity = reinterpret_cast<const void*>(&XGameUiShowTextEntryAsync_impl);
+  ui::Callbacks callbacks = ui::title_callbacks();
+  if (!callbacks.showTextEntry) return begin_without_ui(async, identity, "XGameUiShowTextEntryAsync");
+  auto show = [callbacks, title = keep(title), description = keep(description), defaultText = keep(defaultText), inputScope,
+               maxTextLength](void* handle, task::Queue* queue) {
+    callbacks.showTextEntry(handle, queue, text_of(title), text_of(description), text_of(defaultText), inputScope, maxTextLength,
+                            callbacks.context);
+  };
+  return ui::begin_title_ui(async, identity, "XGameUiShowTextEntryAsync", ui::Request::TextEntry, show);
 }
 HRESULT XGameUiShowTextEntryResultSize_impl(void*, task::AsyncBlock* async, uint32_t* size) {
   if (!size) return E_INVALIDARG;
-  return task::AsyncGetStatus(async, false);
+  size_t bytes = 0;
+  HRESULT hr = task::AsyncGetResultSize(async, &bytes);
+  if (SUCCEEDED(hr)) *size = static_cast<uint32_t>(bytes);
+  return hr;
 }
-HRESULT XGameUiShowTextEntryResult_impl(void*, task::AsyncBlock* async, uint32_t, char*, uint32_t*) {
-  return result_without_payload(async, reinterpret_cast<const void*>(&XGameUiShowTextEntryAsync_impl));
+HRESULT XGameUiShowTextEntryResult_impl(void*, task::AsyncBlock* async, uint32_t size, char* text, uint32_t* used) {
+  size_t bytes = 0;
+  HRESULT hr = task::AsyncGetResult(async, reinterpret_cast<const void*>(&XGameUiShowTextEntryAsync_impl), size, text, &bytes);
+  if (SUCCEEDED(hr) && used) *used = static_cast<uint32_t>(bytes);
+  return hr;
 }
 
 const Override kOverrides[] = {

@@ -12,6 +12,7 @@
 #include "gtx/log.h"
 #include "xgr_internal.h"
 #include "xtask.h"
+#include "handles.h"
 
 namespace gtx::xgr::user {
 namespace {
@@ -42,6 +43,11 @@ User* the_user() {
 
 User* from(void* h) { return reinterpret_cast<User*>(h); }
 
+void hand_out(User* u) {
+  u->refs++;
+  handles::opened(u, handles::Type::User);
+}
+
 HRESULT XUserGetMaxUsers_impl(void*, uint32_t* n) {
   if (!n) return E_INVALIDARG;
   *n = 4;
@@ -56,7 +62,7 @@ HRESULT CALLBACK add_provider(task::AsyncOp op, const task::AsyncProviderData* d
       break;
     case task::AsyncOp::GetResult: {
       User* u = the_user();
-      u->refs++;
+      hand_out(u);
       u->added = true;
       void* h = u;
       std::memcpy(d->buffer, &h, sizeof(h));
@@ -79,12 +85,14 @@ HRESULT XUserAddResult_impl(void*, task::AsyncBlock* a, void** out) {
 
 HRESULT XUserDuplicateHandle_impl(void*, void* h, void** out) {
   if (!h || !out) return E_INVALIDARG;
-  from(h)->refs++;
+  hand_out(from(h));
   *out = h;
   return S_OK;
 }
 void XUserCloseHandle_impl(void*, void* h) {
-  if (h) from(h)->refs--;      // the single process-wide user is never freed
+  if (!h) return;
+  from(h)->refs--;
+  handles::closed(h);
 }
 int32_t XUserCompare_impl(void*, void* a, void* b) { return a == b ? 0 : (a < b ? -1 : 1); }
 HRESULT XUserGetLocalId_impl(void*, void* h, LocalId* out) {
@@ -96,7 +104,7 @@ HRESULT XUserFindUserByLocalId_impl(void*, LocalId id, void** out) {
   if (!out) return E_INVALIDARG;
   User* u = the_user();
   if (id.value != u->localId) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-  u->refs++;
+  hand_out(u);
   *out = u;
   return S_OK;
 }
@@ -109,7 +117,7 @@ HRESULT XUserFindUserById_impl(void*, uint64_t id, void** out) {
   if (!out) return E_INVALIDARG;
   User* u = the_user();
   if (id != u->id) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-  u->refs++;
+  hand_out(u);
   *out = u;
   return S_OK;
 }
@@ -171,7 +179,7 @@ HRESULT XUserFindForDevice_impl(void*, const AppLocalDeviceId* device, void** ou
   if (!device || !out) return E_INVALIDARG;
   User* u = the_user();
   if (!u->added) return kUserNotFound;
-  u->refs++;
+  hand_out(u);
   *out = u;
   return S_OK;
 }

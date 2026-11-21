@@ -12,6 +12,9 @@
 
 #include "xgr_internal.h"
 #include "xtask.h"
+#include "handles.h"
+
+namespace gtx::xgr::storage { bool directory(std::string* path); }
 
 namespace gtx::xgr::package {
 namespace {
@@ -415,15 +418,21 @@ struct Locked {
 
 Monitor* new_monitor() {
   auto* m = new Monitor;
-  Locked lock;
-  g_monitors.insert(m);
+  {
+    Locked lock;
+    g_monitors.insert(m);
+  }
+  handles::opened(m, handles::Type::PackageInstallationMonitor);
   return m;
 }
 
 Mount* new_mount(const std::string& path) {
   auto* m = new Mount{path};
-  Locked lock;
-  g_mounts.insert(m);
+  {
+    Locked lock;
+    g_mounts.insert(m);
+  }
+  handles::opened(m, handles::Type::PackageMount);
   return m;
 }
 
@@ -517,6 +526,7 @@ void XPackageCloseInstallationMonitorHandle_impl(void*, void* handle) {
     Locked lock;
     if (!g_monitors.erase(m)) return;
   }
+  handles::closed(m);
   delete m;
 }
 
@@ -699,6 +709,7 @@ void XPackageCloseMountHandle_impl(void*, void* handle) {
     Locked lock;
     if (!g_mounts.erase(m)) return;
   }
+  handles::closed(m);
   delete m;
 }
 
@@ -790,6 +801,25 @@ HRESULT XPackageMountWithUiResult_impl(void*, task::AsyncBlock* async, void** mo
   return task::AsyncGetResult(async, reinterpret_cast<const void*>(&XPackageMountWithUiAsync_impl), sizeof(void*), mount, nullptr);
 }
 
+HRESULT XPackageUninstallChunks_impl(void*, const char* packageIdentifier, uint32_t count, const Selector* selectors) {
+  HRESULT hr = resolve_package(packageIdentifier);
+  if (FAILED(hr)) return hr;
+  if (!count || !selectors) return E_INVALIDARG;
+  for (uint32_t i = 0; i < count; ++i)
+    if (selectors[i].type == SelectorType::Chunk) return E_INVALIDARG;
+  return check_selectors(count, selectors);
+}
+
+HRESULT XPersistentLocalStorageMountForPackage_impl(void*, const char* packageIdentifier, void** mount) {
+  if (!mount) return E_INVALIDARG;
+  *mount = nullptr;
+  if (!packageIdentifier) return E_INVALIDARG;
+  std::string path;
+  if (FAILED(resolve_package(packageIdentifier)) || !storage::directory(&path)) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+  *mount = new_mount(path);
+  return S_OK;
+}
+
 HRESULT XPackageGetKind_impl(void*, const char* packageIdentifier, Kind* kind) {
   if (!kind) return E_INVALIDARG;
   HRESULT hr = resolve_package(packageIdentifier);
@@ -828,6 +858,8 @@ const Override kOverrides[] = {
     {"XPackageMountWithUiAsync", reinterpret_cast<void*>(&XPackageMountWithUiAsync_impl)},
     {"XPackageMountWithUiResult", reinterpret_cast<void*>(&XPackageMountWithUiResult_impl)},
     {"XPackageGetKind", reinterpret_cast<void*>(&XPackageGetKind_impl)},
+    {"XPackageUninstallChunks", reinterpret_cast<void*>(&XPackageUninstallChunks_impl)},
+    {"XPersistentLocalStorageMountForPackage", reinterpret_cast<void*>(&XPersistentLocalStorageMountForPackage_impl)},
 };
 
 }  // namespace

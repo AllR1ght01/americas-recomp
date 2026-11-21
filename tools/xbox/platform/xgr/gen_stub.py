@@ -117,10 +117,16 @@ extern "C" HRESULT QueryApiImpl(const GUID& provider, const GUID& iid, void** ou
 extern "C" HRESULT InitializeApiImpl(uint64_t a, uint64_t b) { Log("InitializeApiImpl %llx %llx", a, b); return S_OK; }
 extern "C" HRESULT InitializeApiImplEx(uint64_t a, uint64_t b, uint64_t f) { Log("InitializeApiImplEx %llx %llx flags=%llx", a, b, f); return S_OK; }
 extern "C" HRESULT InitializeApiImplEx2(uint64_t a, uint64_t b, uint64_t f, void* o) { Log("InitializeApiImplEx2 %llx %llx flags=%llx options=%p", a, b, f, o); return S_OK; }
-extern "C" void UninitializeApiImpl() { Log("UninitializeApiImpl"); }
 #ifdef XGR_WITH_RUNTIME
 namespace gtx::xgr::system { void report_error(HRESULT hr, const char* message); }
+namespace gtx::xgr::handles { void report_leaks(); }
 #endif
+extern "C" void UninitializeApiImpl() {
+  Log("UninitializeApiImpl");
+#ifdef XGR_WITH_RUNTIME
+  gtx::xgr::handles::report_leaks();
+#endif
+}
 extern "C" void XErrorReport(HRESULT hr, const char* m) {
   Log("XErrorReport %08lx %s", (unsigned long)hr, m ? m : "");
 #ifdef XGR_WITH_RUNTIME

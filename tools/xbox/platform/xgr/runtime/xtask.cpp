@@ -11,6 +11,7 @@
 //    caller may free the block inside its completion callback (the GDK allows that).
 #define GTX_SHIM_DLL "xgameruntime.dll"
 #include "xtask.h"
+#include "handles.h"
 
 #include <algorithm>
 #include <atomic>
@@ -775,12 +776,19 @@ void v_Complete(void*, AsyncBlock* b, HRESULT r, size_t s) { AsyncComplete(b, r,
 HRESULT v_GetResult(void*, AsyncBlock* b, const void* id, size_t s, void* buf, size_t* u) {
   return AsyncGetResult(b, id, s, buf, u);
 }
-HRESULT v_Create(void*, DispatchMode w, DispatchMode c, Queue** q) { return Create(w, c, q); }
-HRESULT v_CreateComposite(void*, Port* w, Port* c, Queue** q) { return CreateComposite(w, c, q); }
+HRESULT opened_queue(HRESULT hr, Queue** q) {
+  if (SUCCEEDED(hr)) handles::opened(*q, handles::Type::TaskQueue);
+  return hr;
+}
+HRESULT v_Create(void*, DispatchMode w, DispatchMode c, Queue** q) { return opened_queue(Create(w, c, q), q); }
+HRESULT v_CreateComposite(void*, Port* w, Port* c, Queue** q) { return opened_queue(CreateComposite(w, c, q), q); }
 HRESULT v_GetPort(void*, Queue* q, PortId p, Port** out) { return GetPort(q, p, out); }
-HRESULT v_Duplicate(void*, Queue* q, Queue** out) { return Duplicate(q, out); }
+HRESULT v_Duplicate(void*, Queue* q, Queue** out) { return opened_queue(Duplicate(q, out), out); }
 bool v_Dispatch(void*, Queue* q, PortId p, uint32_t t) { return Dispatch(q, p, t); }
-void v_Close(void*, Queue* q) { Close(q); }
+void v_Close(void*, Queue* q) {
+  handles::closed(q);
+  Close(q);
+}
 HRESULT v_Terminate(void*, Queue* q, bool w, void* c, TerminatedCallback cb) {
   return Terminate(q, w, c, cb);
 }
@@ -797,7 +805,11 @@ HRESULT v_RegisterMonitor(void*, Queue* q, void* c, MonitorCallback cb, Registra
   return RegisterMonitor(q, c, cb, t);
 }
 void v_UnregisterMonitor(void*, Queue* q, RegistrationToken t) { UnregisterMonitor(q, t); }
-bool v_GetProcessQueue(void*, Queue** q) { return GetProcessQueue(q); }
+bool v_GetProcessQueue(void*, Queue** q) {
+  if (!GetProcessQueue(q)) return false;
+  handles::opened(*q, handles::Type::TaskQueue);
+  return true;
+}
 void v_SetProcessQueue(void*, Queue* q) { SetProcessQueue(q); }
 bool v_IsEmpty(void*, Queue* q, PortId p) { return IsEmpty(q, p); }
 
