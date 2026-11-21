@@ -309,6 +309,7 @@ int main(int argc, char** argv) {
         std::uint32_t targetW = 8, targetH = 8, inputAddr = 2, interpCount = 0, fp16Mask = 0;
         std::uint32_t geomInputPrimitive = 3, geomOutputTopology = 3, geomMaxOutputVertices = 3;
         std::uint32_t geomEsgsItemSize = 8, geomGsvsVertexSize = 8, geomInputAttributes = 1, geomOutputAttributes = 1;
+        std::uint32_t drawVertices = 3;
         std::string vsPath, fsPath;
         std::uint8_t expMode[8] = {4, 4, 4, 4, 4, 4, 4, 4}, expMap[8] = {0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4};
         std::uint32_t threads[3] = {0, 1, 1};
@@ -524,6 +525,7 @@ int main(int argc, char** argv) {
             geom.gsvsOffsetDwords = std::max(64u, (inVerts * geomEsgsItemSize + 63u) & ~63u);
             geom.inputAttributeCount = geomInputAttributes;
             geom.outputAttributeCount = geomOutputAttributes;
+            drawVertices = inVerts;
             g.geometry = geom;
             request.graphics = g;
             request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};
@@ -742,6 +744,15 @@ int main(int argc, char** argv) {
             VkPipelineVertexInputStateCreateInfo vin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
             VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
             ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            if (geometry) {
+                switch (geomInputPrimitive) {
+                    case 1: ia.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+                    case 2: ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+                    case 4: ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY; break;
+                    case 5: ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY; break;
+                    default: break;
+                }
+            }
             VkViewport vp{0, 0, static_cast<float>(targetW), static_cast<float>(targetH), 0, 1};
             VkRect2D sc{{0, 0}, {targetW, targetH}};
             VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -890,7 +901,7 @@ int main(int argc, char** argv) {
             if (hasDepth) rinfo.pDepthAttachment = &depthAtt;
             rinfo.renderArea = {{0, 0}, {targetW, targetH}}; rinfo.layerCount = 1; rinfo.colorAttachmentCount = 8; rinfo.pColorAttachments = atts.data();
             vkCmdBeginRendering(cmd, &rinfo);
-            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdDraw(cmd, drawVertices, 1, 0, 0);
             vkCmdEndRendering(cmd);
             if (hasDepth) {
                 VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
