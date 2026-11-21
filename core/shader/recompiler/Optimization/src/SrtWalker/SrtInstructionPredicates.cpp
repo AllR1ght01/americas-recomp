@@ -57,9 +57,85 @@ bool IsRuntimeSelect(IrOpcode opcode) {
 
 namespace {
 
-// XBOX-FORK: a loop-carried mask (waterfall loops: exec narrowed by v_cmpx each iteration) is a Phi whose incoming
-// values are the entry mask and "previous mask AND something". It implies `condition` when every incoming value does;
-// a path that returns to a Phi already being examined only narrows the mask, so it counts as implied (greatest fixpoint).
+bool extractBitTest(const IrValue* value, const IrValue*& word, const IrValue*& shift) {
+    if (value == nullptr) return false;
+    value = value->Resolve();
+    if (value->Opcode() != IrOpcode::INotEqual32 || value->ArgumentCount() != 2u) return false;
+    const IrValue* a = value->Argument(0)->Resolve();
+    const IrValue* b = value->Argument(1)->Resolve();
+    const IrValue* masked = nullptr;
+    if (b->HasImmediate() && b->Type() == IrType::U32 && b->ImmediateU32() == 0u) masked = a;
+    else if (a->HasImmediate() && a->Type() == IrType::U32 && a->ImmediateU32() == 0u) masked = b;
+    else return false;
+    if (masked->Opcode() != IrOpcode::BitwiseAnd32 || masked->ArgumentCount() != 2u) return false;
+    const IrValue* m0 = masked->Argument(0)->Resolve();
+    const IrValue* m1 = masked->Argument(1)->Resolve();
+    const IrValue* shifted = nullptr;
+    if (m1->HasImmediate() && m1->Type() == IrType::U32 && m1->ImmediateU32() == 1u) shifted = m0;
+    else if (m0->HasImmediate() && m0->Type() == IrType::U32 && m0->ImmediateU32() == 1u) shifted = m1;
+    else return false;
+    if (shifted->Opcode() != IrOpcode::ShiftRightLogical32 || shifted->ArgumentCount() != 2u) return false;
+    word = shifted->Argument(0)->Resolve();
+    shift = shifted->Argument(1)->Resolve();
+    return true;
+}
+
+bool isLaneLowBitShift(const IrValue* shift) {
+    if (shift == nullptr) return false;
+    shift = shift->Resolve();
+    if (shift->Opcode() == IrOpcode::LaneId) return true;
+    if (shift->Opcode() != IrOpcode::BitwiseAnd32 || shift->ArgumentCount() != 2u) return false;
+    const IrValue* a = shift->Argument(0)->Resolve();
+    const IrValue* b = shift->Argument(1)->Resolve();
+    return (a->Opcode() == IrOpcode::LaneId && b->HasImmediate() && b->Type() == IrType::U32 && b->ImmediateU32() == 31u) ||
+           (b->Opcode() == IrOpcode::LaneId && a->HasImmediate() && a->Type() == IrType::U32 && a->ImmediateU32() == 31u);
+}
+
+bool extractBallotWord(const IrValue* word, const IrValue*& pred) {
+    if (word == nullptr) return false;
+    word = word->Resolve();
+    if (word->Opcode() != IrOpcode::CompositeExtractU32x4 || word->ArgumentCount() != 2u) return false;
+    const IrValue* idx = word->Argument(1)->Resolve();
+    if (!idx->HasImmediate() || idx->Type() != IrType::U32 || idx->ImmediateU32() > 1u) return false;
+    const IrValue* ballot = word->Argument(0)->Resolve();
+    if (ballot->Opcode() != IrOpcode::Ballot || ballot->ArgumentCount() != 1u) return false;
+    pred = ballot->Argument(0)->Resolve();
+    return true;
+}
+
+bool activeMaskImplies(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition, std::vector<const IrValue*>& visiting, std::uint32_t depth);
+
+bool bitMaskImplies(const IrResourcePlan& program, const IrValue* maskWord, const IrValue* condWord, const IrValue* condTest, const IrValue* shift, std::vector<const IrValue*>& visiting, std::uint32_t depth) {
+    if (maskWord == nullptr || condWord == nullptr) return false;
+    maskWord = maskWord->Resolve();
+    condWord = condWord->Resolve();
+    if (maskWord == condWord || EquivalentValue(program, maskWord, condWord)) return true;
+    if (depth == 0u) return false;
+    if (maskWord->Opcode() == IrOpcode::BitwiseAnd32 && maskWord->ArgumentCount() == 2u) {
+        return bitMaskImplies(program, maskWord->Argument(0), condWord, condTest, shift, visiting, depth - 1u) ||
+               bitMaskImplies(program, maskWord->Argument(1), condWord, condTest, shift, visiting, depth - 1u);
+    }
+    if (condWord->Opcode() == IrOpcode::BitwiseAnd32 && condWord->ArgumentCount() == 2u) {
+        return bitMaskImplies(program, maskWord, condWord->Argument(0), condTest, shift, visiting, depth - 1u) &&
+               bitMaskImplies(program, maskWord, condWord->Argument(1), condTest, shift, visiting, depth - 1u);
+    }
+    if (maskWord->IsPhi() && maskWord->ArgumentCount() != 0u) {
+        if (std::find(visiting.begin(), visiting.end(), maskWord) != visiting.end()) return true;
+        visiting.push_back(maskWord);
+        bool all = true;
+        for (std::size_t index = 0; all && index < maskWord->ArgumentCount(); ++index) {
+            all = bitMaskImplies(program, maskWord->Argument(index), condWord, condTest, shift, visiting, depth - 1u);
+        }
+        visiting.pop_back();
+        return all;
+    }
+    const IrValue* ballotPred = nullptr;
+    if (condTest != nullptr && isLaneLowBitShift(shift) && extractBallotWord(maskWord, ballotPred)) {
+        return activeMaskImplies(program, ballotPred, condTest, visiting, depth - 1u);
+    }
+    return false;
+}
+
 bool activeMaskImplies(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition, std::vector<const IrValue*>& visiting, std::uint32_t depth) {
     if (mask == nullptr || condition == nullptr) return false;
     mask = mask->Resolve();
@@ -69,6 +145,14 @@ bool activeMaskImplies(const IrResourcePlan& program, const IrValue* mask, const
     if (depth == 0u) return false;
     if (mask->Opcode() == IrOpcode::LogicalAnd && mask->ArgumentCount() == 2) {
         return activeMaskImplies(program, mask->Argument(0), condition, visiting, depth - 1u) || activeMaskImplies(program, mask->Argument(1), condition, visiting, depth - 1u);
+    }
+    if (mask->Opcode() == IrOpcode::LogicalXor && mask->ArgumentCount() == 2) {
+        if (std::find(visiting.begin(), visiting.end(), mask) != visiting.end()) return true;
+        visiting.push_back(mask);
+        const bool both = activeMaskImplies(program, mask->Argument(0), condition, visiting, depth - 1u) &&
+                          activeMaskImplies(program, mask->Argument(1), condition, visiting, depth - 1u);
+        visiting.pop_back();
+        return both;
     }
     if (mask->IsPhi() && mask->ArgumentCount() != 0u) {
         if (std::find(visiting.begin(), visiting.end(), mask) != visiting.end()) return true;
@@ -80,6 +164,112 @@ bool activeMaskImplies(const IrResourcePlan& program, const IrValue* mask, const
         visiting.pop_back();
         return all;
     }
+    const IrValue* maskWord = nullptr;
+    const IrValue* maskShift = nullptr;
+    const IrValue* condWord = nullptr;
+    const IrValue* condShift = nullptr;
+    if (extractBitTest(mask, maskWord, maskShift) && extractBitTest(condition, condWord, condShift) &&
+        EquivalentValue(program, maskShift, condShift)) {
+        return bitMaskImplies(program, maskWord, condWord, condition, maskShift, visiting, depth - 1u);
+    }
+    return false;
+}
+
+bool activeMaskDisjoint(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition, std::vector<std::pair<const IrValue*, const IrValue*>>& visiting, std::uint32_t depth);
+
+bool bitMaskWordDisjoint(const IrResourcePlan& program, const IrValue* otherBool, const IrValue* word, std::vector<std::pair<const IrValue*, const IrValue*>>& visiting, std::uint32_t depth) {
+    if (otherBool == nullptr || word == nullptr || depth == 0u) return false;
+    word = word->Resolve();
+    if (word->Opcode() == IrOpcode::BitwiseAnd32 && word->ArgumentCount() == 2u) {
+        return bitMaskWordDisjoint(program, otherBool, word->Argument(0), visiting, depth - 1u) ||
+               bitMaskWordDisjoint(program, otherBool, word->Argument(1), visiting, depth - 1u);
+    }
+    if (word->IsPhi() && word->ArgumentCount() != 0u) {
+        const auto pair = std::make_pair(otherBool, word);
+        if (std::find(visiting.begin(), visiting.end(), pair) != visiting.end()) return true;
+        visiting.push_back(pair);
+        bool all = true;
+        for (std::size_t index = 0; all && index < word->ArgumentCount(); ++index) {
+            all = bitMaskWordDisjoint(program, otherBool, word->Argument(index), visiting, depth - 1u);
+        }
+        visiting.pop_back();
+        return all;
+    }
+    const IrValue* ballotPred = nullptr;
+    if (extractBallotWord(word, ballotPred)) {
+        return activeMaskDisjoint(program, otherBool, ballotPred, visiting, depth - 1u);
+    }
+    return false;
+}
+
+bool activeMaskDisjoint(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition, std::vector<std::pair<const IrValue*, const IrValue*>>& visiting, std::uint32_t depth) {
+    if (mask == nullptr || condition == nullptr || depth == 0u) return false;
+    mask = mask->Resolve();
+    condition = condition->Resolve();
+    if (condition->Opcode() == IrOpcode::LogicalNot && condition->ArgumentCount() == 1u) {
+        std::vector<const IrValue*> impVisiting;
+        return activeMaskImplies(program, mask, condition->Argument(0), impVisiting, 48u);
+    }
+    if (mask->Opcode() == IrOpcode::LogicalNot && mask->ArgumentCount() == 1u) {
+        std::vector<const IrValue*> impVisiting;
+        return activeMaskImplies(program, condition, mask->Argument(0), impVisiting, 48u);
+    }
+    if (condition->Opcode() == IrOpcode::LogicalAnd && condition->ArgumentCount() == 2u) {
+        return activeMaskDisjoint(program, mask, condition->Argument(0), visiting, depth - 1u) ||
+               activeMaskDisjoint(program, mask, condition->Argument(1), visiting, depth - 1u);
+    }
+    if (mask->Opcode() == IrOpcode::LogicalAnd && mask->ArgumentCount() == 2u) {
+        return activeMaskDisjoint(program, mask->Argument(0), condition, visiting, depth - 1u) ||
+               activeMaskDisjoint(program, mask->Argument(1), condition, visiting, depth - 1u);
+    }
+    if (condition->Opcode() == IrOpcode::LogicalXor && condition->ArgumentCount() == 2u) {
+        const auto pair = std::make_pair(mask, condition);
+        if (std::find(visiting.begin(), visiting.end(), pair) != visiting.end()) return true;
+        visiting.push_back(pair);
+        const bool both = activeMaskDisjoint(program, mask, condition->Argument(0), visiting, depth - 1u) &&
+                          activeMaskDisjoint(program, mask, condition->Argument(1), visiting, depth - 1u);
+        visiting.pop_back();
+        return both;
+    }
+    if (mask->Opcode() == IrOpcode::LogicalXor && mask->ArgumentCount() == 2u) {
+        const auto pair = std::make_pair(mask, condition);
+        if (std::find(visiting.begin(), visiting.end(), pair) != visiting.end()) return true;
+        visiting.push_back(pair);
+        const bool both = activeMaskDisjoint(program, mask->Argument(0), condition, visiting, depth - 1u) &&
+                          activeMaskDisjoint(program, mask->Argument(1), condition, visiting, depth - 1u);
+        visiting.pop_back();
+        return both;
+    }
+    if (condition->IsPhi() && condition->ArgumentCount() != 0u) {
+        const auto pair = std::make_pair(mask, condition);
+        if (std::find(visiting.begin(), visiting.end(), pair) != visiting.end()) return true;
+        visiting.push_back(pair);
+        bool all = true;
+        for (std::size_t index = 0; all && index < condition->ArgumentCount(); ++index) {
+            all = activeMaskDisjoint(program, mask, condition->Argument(index), visiting, depth - 1u);
+        }
+        visiting.pop_back();
+        return all;
+    }
+    if (mask->IsPhi() && mask->ArgumentCount() != 0u) {
+        const auto pair = std::make_pair(mask, condition);
+        if (std::find(visiting.begin(), visiting.end(), pair) != visiting.end()) return true;
+        visiting.push_back(pair);
+        bool all = true;
+        for (std::size_t index = 0; all && index < mask->ArgumentCount(); ++index) {
+            all = activeMaskDisjoint(program, mask->Argument(index), condition, visiting, depth - 1u);
+        }
+        visiting.pop_back();
+        return all;
+    }
+    const IrValue* word = nullptr;
+    const IrValue* shift = nullptr;
+    if (extractBitTest(condition, word, shift) && isLaneLowBitShift(shift)) {
+        if (bitMaskWordDisjoint(program, mask, word, visiting, depth - 1u)) return true;
+    }
+    if (extractBitTest(mask, word, shift) && isLaneLowBitShift(shift)) {
+        if (bitMaskWordDisjoint(program, condition, word, visiting, depth - 1u)) return true;
+    }
     return false;
 }
 
@@ -87,7 +277,12 @@ bool activeMaskImplies(const IrResourcePlan& program, const IrValue* mask, const
 
 bool ActiveMaskImplies(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition) {
     std::vector<const IrValue*> visiting;
-    return activeMaskImplies(program, mask, condition, visiting, 24u);
+    return activeMaskImplies(program, mask, condition, visiting, 48u);
+}
+
+bool ActiveMaskDisjoint(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition) {
+    std::vector<std::pair<const IrValue*, const IrValue*>> visiting;
+    return activeMaskDisjoint(program, mask, condition, visiting, 48u);
 }
 
 bool IsRuntimeUniformOp(IrOpcode opcode) {

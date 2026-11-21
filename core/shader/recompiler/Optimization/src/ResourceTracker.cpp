@@ -1852,12 +1852,23 @@ private:
         return pos;
     }
 
+    IrValue* SimplifyUnderActiveMask(IrValue* value, const IrValue* activeMask) const {
+        value = value->Resolve();
+        while (activeMask != nullptr && value->Opcode() == IrOpcode::SelectU32 && value->ArgumentCount() == 3u) {
+            if (Detail::ActiveMaskImplies(m_program.Resources(), activeMask, value->Argument(0))) {
+                value = value->Argument(1)->Resolve();
+            } else if (Detail::ActiveMaskDisjoint(m_program.Resources(), activeMask, value->Argument(0))) {
+                value = value->Argument(2)->Resolve();
+            } else {
+                break;
+            }
+        }
+        return value;
+    }
+
     IrValue* WebSelector(std::vector<IrValue*> tuple, DescriptorWeb& web, IrValue& position, const IrValue* activeMask = nullptr) {
         for (IrValue*& value : tuple) {
-            value = value->Resolve();
-            while (activeMask != nullptr && value->Opcode() == IrOpcode::SelectU32 && value->ArgumentCount() == 3u && Detail::ActiveMaskImplies(m_program.Resources(), activeMask, value->Argument(0))) {
-                value = value->Argument(1)->Resolve();
-            }
+            value = SimplifyUnderActiveMask(value, activeMask);
             if (!value->IsPhi()) {
                 continue;
             }
@@ -1866,10 +1877,7 @@ private:
                 IrValue* invariant = ResolveInvariantPhi(m_program.Resources(), value);
                 entry->second = invariant == nullptr ? value : invariant->Resolve();
             }
-            value = entry->second;
-            while (activeMask != nullptr && value->Opcode() == IrOpcode::SelectU32 && value->ArgumentCount() == 3u && Detail::ActiveMaskImplies(m_program.Resources(), activeMask, value->Argument(0))) {
-                value = value->Argument(1)->Resolve();
-            }
+            value = SimplifyUnderActiveMask(entry->second, activeMask);
         }
         const auto key = std::make_pair(tuple, activeMask);
         if (const auto known = web.selectors.find(key); known != web.selectors.end()) {
