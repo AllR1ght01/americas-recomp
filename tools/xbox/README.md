@@ -22,6 +22,11 @@ Experimental tooling for running Xbox Series shader code through the shader reco
    extraction pipeline and `rdna2.py` decoder kept next to the dumped shaders; adjust its paths).
    `carve_shaders.py` does the same from the archive alone: `python3 tools/xbox/carve_shaders.py <game>/shaders.rpf
    --out <dir>` writes `<dir>/bins/<idx>.bin` and `<dir>/manifest.csv`, with no table of contents and no decoder.
+   Whole-corpus run on that output: `XBOX_RDNA2=recomp python -I tools/xbox/bindings.py <dir>/bins <dir>/binds`, then from a run
+   directory `python -I tools/xbox/run_full.py out.json --no-canary` with `XBOX_CORPUS=<dir>`, `XBOX_SPIRV_VAL=<spirv-val>` and
+   `XBOX_DRIVER_CS` / `XBOX_DRIVER_GFX` set to the `driver.exe` that `build_msvc.py` builds (`XBOX_BUILD` holds the result cache).
+   The carver numbers shaders in archive order, which is not the numbering of `docs/xbox/results.json` and `canary.json`, so only
+   per-stage totals compare, and the canaries are refused on a carved corpus.
 3. `driver.exe <code.bin> <wave 32|64> <out.spv> [user_data_dwords]` recompiles one compute shader with stubbed
    bindings (user-data pointer pairs backed by fake buffer-descriptor memory).
 4. `run_batch.py` runs the driver over a directory of blobs and validates with `spirv-val`.

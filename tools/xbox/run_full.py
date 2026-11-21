@@ -13,21 +13,31 @@ retry). Shaders listed in the --skip files (earlier results, by idx) are not run
 killed run can be resumed by passing its own output as --skip. Stage '?' in the manifest is mesh (type 6/7), GS has no driver mode and
 is recorded as SKIP."""
 import subprocess, csv, sys, collections, concurrent.futures as cf, json, os, time
-sys.path.insert(0, r"E:/Programming/rpf9shaders/out_disasm")
+sys.path.insert(0, os.environ.get("XBOX_RDNA2_DIR", r"E:/Programming/rpf9shaders/out_disasm"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # harness_guard, canary (python -I does not add it)
-import rdna2
+try:
+    if os.environ.get("XBOX_RDNA2") == "recomp":
+        raise ImportError
+    import rdna2
+except ImportError:
+    import rdna2_recomp as rdna2
 
-M = r"E:/Programming/rpf9shaders/out_disasm/anyps5/"
-VAL = r"C:/VulkanSDK/1.4.363.1/Bin/spirv-val.exe"
-BUILD = r"E:/Programming/anyps5_src/build/"
+M = os.path.join(os.environ.get("XBOX_CORPUS", r"E:/Programming/rpf9shaders/out_disasm/anyps5"), "")
+CARVED = not os.path.exists(M + "manifest_full.csv") and os.path.exists(M + "manifest.csv")
+BINS = M + ("bins/" if CARVED else "bins_full/")
+MANIFEST = M + ("manifest.csv" if CARVED else "manifest_full.csv")
+VAL = os.environ.get("XBOX_SPIRV_VAL", r"C:/VulkanSDK/1.4.363.1/Bin/spirv-val.exe")
+BUILD = os.path.join(os.environ.get("XBOX_BUILD", r"E:/Programming/anyps5_src/build"), "")
+DRIVER_CS = os.environ.get("XBOX_DRIVER_CS", BUILD + "driver_heap.exe")
 DRIVER_GFX = os.environ.get("XBOX_DRIVER_GFX", BUILD + "driver_gfx2.exe")    # PS/VS/MS driver; override to test a new build
+PATH_VARS = ("XBOX_CORPUS", "XBOX_BUILD", "XBOX_SPIRV_VAL", "XBOX_DRIVER_CS", "XBOX_DRIVER_GFX", "XBOX_RDNA2_DIR")
 LIMIT = 120                      # seconds per driver run
-BINDS = M + "binds_full/"        # canary.py --binds-dir points this elsewhere for its self-test
-GFX = {"PS": "ps", "VS": "vs", "?": "ms", "GS": "gs"}
+BINDS = M + ("binds/" if CARVED else "binds_full/")
+GFX = {"PS": "ps", "VS": "vs", "?": "ms", "MS": "ms", "GS": "gs"}
 
 
 def attrs(idx):
-    d = open(M + f"bins_full/{idx}.bin", "rb").read()
+    d = open(BINS + f"{idx}.bin", "rb").read()
     ins, _ = rdna2.sweep(d, 0, len(d))
     a, f = [], []
     for i in ins:
@@ -59,7 +69,7 @@ def compute(idx):
     os.makedirs("spv_full", exist_ok=True)
     for v in (None, 0, 2, 3):          # None = the driver's default (zeros), 0 = unbacked, 2 = tiled T# records, 3 = tiled V# records
         spv = f"spv_full/{idx}.{v}.spv"
-        cmd = [BUILD + "driver_heap.exe", M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind"] + ([str(v)] if v is not None else [])
+        cmd = [DRIVER_CS, BINS + f"{idx}.bin", "32", spv, BINDS + f"{idx}.bind"] + ([str(v)] if v is not None else [])
         s, d = classify(cmd, spv, dict(os.environ))
         if os.path.exists(spv):
             os.remove(spv)
@@ -79,7 +89,7 @@ def graphics(idx, st, relaxed):
         e = dict(env)
         if bary:
             e["XBOX_FRAGMENT_BARY"] = "1"
-        cmd = [DRIVER_GFX, M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
+        cmd = [DRIVER_GFX, BINS + f"{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
         if st == "ps":
             n, mask = attrs(idx)
             cmd += ["2", str(n), "%x" % mask]
@@ -125,11 +135,11 @@ def cache_key(r, relaxed):
     import hashlib
     idx, stage = r["idx"], r["stage"]
     h = hashlib.sha256()
-    drv = BUILD + "driver_heap.exe" if stage == "CS" else DRIVER_GFX
+    drv = DRIVER_CS if stage == "CS" else DRIVER_GFX
     for part in (_logic_hash(), _file_hash(drv), _file_hash(VAL), stage, str(relaxed),
-                 repr(sorted((k, v) for k, v in os.environ.items() if k.startswith("XBOX_") and k != "XBOX_DRIVER_GFX"))):
+                 repr(sorted((k, v) for k, v in os.environ.items() if k.startswith("XBOX_") and k not in PATH_VARS))):
         h.update(part.encode() + b"\0")
-    h.update(open(M + f"bins_full/{idx}.bin", "rb").read())
+    h.update(open(BINS + f"{idx}.bin", "rb").read())
     h.update(b"\0" + open(BINDS + f"{idx}.bind", "rb").read())
     return h.hexdigest()
 
@@ -144,7 +154,7 @@ def one(job):
 def _one(job):
     r, relaxed = job
     idx, stage = r["idx"], r["stage"]
-    res = dict(idx=idx, stage=stage, run=r["run"], relaxed=relaxed)
+    res = dict(idx=idx, stage=stage, run=r.get("run", ""), relaxed=relaxed)
     try:
         if stage == "CS":
             res["status"], res["detail"], res["variant"] = compute(idx)
@@ -168,6 +178,8 @@ def main():
     import harness_guard
     harness_guard.require_fresh_binds(BINDS)                 # refuse bindings made by another bindings.py
     if "--no-canary" not in args:
+        if CARVED:
+            sys.exit("canary.json is numbered like manifest_full.csv, not like carve_shaders.py output: pass --no-canary")
         import canary
         if not canary.recompile_ok(WORKERS):                 # known-good shaders must still pass before a corpus run
             sys.exit("canary failed: not starting the corpus run (see above; --no-canary overrides)")
@@ -176,7 +188,7 @@ def main():
         for e in json.load(open(f)):
             skip.add((e["idx"], bool(e.get("relaxed", False))))
     IDX = set(open(args[args.index("--idx-file") + 1]).read().split()) if "--idx-file" in args else None
-    rows = [r for r in csv.DictReader(open(M + "manifest_full.csv")) if (ONLY is None or r["stage"] == ONLY) and (IDX is None or r["idx"] in IDX)]
+    rows = [r for r in csv.DictReader(open(MANIFEST)) if (ONLY is None or r["stage"] == ONLY) and (IDX is None or r["idx"] in IDX)]
     jobs = [(r, x) for r in rows for x in ((False, True) if r["stage"] == "PS" else (False,)) if (r["idx"], x) not in skip]
     # result cache (build dir): a job whose inputs hash the same as in an earlier run reuses that result
     use_cache = "--no-cache" not in args
@@ -187,13 +199,13 @@ def main():
     for job in jobs:
         k = cache_key(*job) if use_cache else None
         if k and k in cache and (cache[k]["status"] != "TIMEOUT" or cache[k].get("limit", 0) >= LIMIT):   # re-run timeouts at a higher limit
-            out.append(dict(cache[k], idx=job[0]["idx"], stage=job[0]["stage"], run=job[0]["run"], relaxed=job[1], cached=True))
+            out.append(dict(cache[k], idx=job[0]["idx"], stage=job[0]["stage"], run=job[0].get("run", ""), relaxed=job[1], cached=True))
         else:
             keys[id(job)] = k
             todo.append(job)
     # slowest first (known run times, else code size). This does not shorten a big run, which is bound by total CPU time (in a full mesh
     # run 30 timeouts were 44% of it); it keeps a few long jobs from trailing at the end of a small one.
-    size = lambda r: os.path.getsize(M + f"bins_full/{r['idx']}.bin")
+    size = lambda r: os.path.getsize(BINS + f"{r['idx']}.bin")
     todo.sort(key=lambda j: (-costs.get(f"{j[0]['idx']}|{int(j[1])}", -1), -size(j[0])))
     print(len(jobs), "jobs,", len(jobs) - len(todo), "from the cache,", len(todo), "to run", flush=True)
     t0 = time.time()
