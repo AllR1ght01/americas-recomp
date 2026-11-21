@@ -374,7 +374,131 @@ def test_load_bc3_unorm():
     _check_bc(_load_bc(173, data), _bc_expected(True))
 
 
-TESTS = [test_resinfo_reports_the_image_extent, test_store_rgba8_unorm, test_store_r32_uint, test_load_3d_r32_uint, test_load_1d_r32_uint, test_sampler_from_guest_ssharp, test_load_cube_array_r32_uint, test_store_cube_array_r32_uint, test_sample_cube_face_coordinates, test_sample_cube_array_layer, test_load_mip_r32_uint, test_sample_explicit_lod_point_mip, test_sample_grad_lod_clamp, test_load_bc1_unorm, test_load_bc3_unorm]
+
+
+def _gather_clamp_expected(lanes, ox=0, oy=0):
+    corners = ((0, 1), (1, 1), (1, 0), (0, 0))
+    want = []
+    for x, y, level in lanes:
+        size = MIP_SIZE >> level
+        for dx, dy in corners:
+            tx = max(0, min(size - 1, x + ox + dx))
+            ty = max(0, min(size - 1, y + oy + dy))
+            want.append(float(_mip_value(tx, ty, level)))
+    return tuple(want)
+
+
+def _gather_mip_lanes():
+    # Group lanes by mip level (8 lanes per level) so subgroup-uniform OpImageQuerySizeLod works on Mesa Lavapipe 22.x too.
+    lanes = []
+    for lane in range(32):
+        level = lane // 8
+        size = MIP_SIZE >> level
+        texel = ((lane & 7) * 3) % (size * size)
+        lanes.append((texel % size, texel // size, level))
+    return lanes
+
+
+def test_gather4_lod_clamp():
+    lanes = _gather_mip_lanes()
+    coords = b"".join(
+        struct.pack('<4f', (x + 1.0) / (MIP_SIZE >> level), (y + 1.0) / (MIP_SIZE >> level), float(level), 0.0)
+        for x, y, level in lanes
+    )
+    clamp, point_mip = 2, 1
+    ssharp = [clamp | (clamp << 3) | (clamp << 6), 0xfff << 12, point_mip << 26, 0]
+    p = rdna_asm.Program()
+    p.smem('s_load_dwordx8', 8, 4, 0)
+    p.smem('s_load_dwordx4', 16, 4, 32)
+    _out_vsharp(p, 20, 48)
+    _out_vsharp(p, 24, 64)
+    p.sopp('s_waitcnt', 0)
+    p.vop2('v_lshlrev_b32', 8, 4, 'v0')
+    p.mubuf('buffer_load_dwordx3', 1, 8, 24, 128, 0)
+    p.sopp('s_waitcnt', 0)
+    p.mimg('image_gather4_cl', 4, 1, 8, dmask=1, ssamp=16)
+    p.sopp('s_waitcnt', 0)
+    p.mubuf('buffer_store_dwordx4', 4, 8, 20, 128, 0)
+    p.sopp('s_endpgm')
+    pokes = [f"poke 0 {32 + 4 * k} {w}" for k, w in enumerate(ssharp)] + T.vsharp(0, 48, 2, 512) + T.vsharp(0, 64, 3, 512)
+    init = _mip_init(lambda v: struct.pack('<f', v))
+    image = f"image 1 {MIP_SIZE} {MIP_SIZE} format 22 mips {MIP_LEVELS} init {init}"
+    r = T.run(p.bytes(), {0: (256, None), 2: (512, None), 3: (512, coords)}, pokes, extra=[image, "timg 0 0 1"])
+    got = struct.unpack('<128f', r[2][:512])
+    want = _gather_clamp_expected(lanes)
+    assert got == want, [(i, got[i], want[i]) for i in range(128) if got[i] != want[i]][:8]
+
+
+def test_gather4_lod_clamp_offset():
+    lanes = _gather_mip_lanes()
+    ox, oy = 1, -1
+    packed_off = (ox & 0x3f) | ((oy & 0x3f) << 8)
+    coords = b"".join(
+        struct.pack('<I3f', packed_off, (x + 1.0) / (MIP_SIZE >> level), (y + 1.0) / (MIP_SIZE >> level), float(level))
+        for x, y, level in lanes
+    )
+    clamp, point_mip = 2, 1
+    ssharp = [clamp | (clamp << 3) | (clamp << 6), 0xfff << 12, point_mip << 26, 0]
+    p = rdna_asm.Program()
+    p.smem('s_load_dwordx8', 8, 4, 0)
+    p.smem('s_load_dwordx4', 16, 4, 32)
+    _out_vsharp(p, 20, 48)
+    _out_vsharp(p, 24, 64)
+    p.sopp('s_waitcnt', 0)
+    p.vop2('v_lshlrev_b32', 9, 4, 'v0')
+    p.mubuf('buffer_load_dwordx4', 1, 9, 24, 128, 0)
+    p.sopp('s_waitcnt', 0)
+    p.mimg('image_gather4_cl_o', 5, 1, 8, dmask=1, ssamp=16)
+    p.sopp('s_waitcnt', 0)
+    p.mubuf('buffer_store_dwordx4', 5, 9, 20, 128, 0)
+    p.sopp('s_endpgm')
+    pokes = [f"poke 0 {32 + 4 * k} {w}" for k, w in enumerate(ssharp)] + T.vsharp(0, 48, 2, 512) + T.vsharp(0, 64, 3, 512)
+    init = _mip_init(lambda v: struct.pack('<f', v))
+    image = f"image 1 {MIP_SIZE} {MIP_SIZE} format 22 mips {MIP_LEVELS} init {init}"
+    r = T.run(p.bytes(), {0: (256, None), 2: (512, None), 3: (512, coords)}, pokes, extra=[image, "timg 0 0 1"])
+    got = struct.unpack('<128f', r[2][:512])
+    want = _gather_clamp_expected(lanes, ox=ox, oy=oy)
+    assert got == want, [(i, got[i], want[i]) for i in range(128) if got[i] != want[i]][:8]
+
+
+
+def test_gather4_bias_lod_clamp():
+    lanes = _gather_mip_lanes()
+    # Half the lanes select mip via bias > clamp, half via clamp > bias.
+    coords = b"".join(
+        struct.pack(
+            '<4f',
+            float(level) if (i & 1) == 0 else 0.0,
+            (x + 1.0) / (MIP_SIZE >> level),
+            (y + 1.0) / (MIP_SIZE >> level),
+            0.0 if (i & 1) == 0 else float(level),
+        )
+        for i, (x, y, level) in enumerate(lanes)
+    )
+    clamp, point_mip = 2, 1
+    ssharp = [clamp | (clamp << 3) | (clamp << 6), 0xfff << 12, point_mip << 26, 0]
+    p = rdna_asm.Program()
+    p.smem('s_load_dwordx8', 8, 4, 0)
+    p.smem('s_load_dwordx4', 16, 4, 32)
+    _out_vsharp(p, 20, 48)
+    _out_vsharp(p, 24, 64)
+    p.sopp('s_waitcnt', 0)
+    p.vop2('v_lshlrev_b32', 9, 4, 'v0')
+    p.mubuf('buffer_load_dwordx4', 1, 9, 24, 128, 0)
+    p.sopp('s_waitcnt', 0)
+    p.mimg('image_gather4_b_cl', 5, 1, 8, dmask=1, ssamp=16)
+    p.sopp('s_waitcnt', 0)
+    p.mubuf('buffer_store_dwordx4', 5, 9, 20, 128, 0)
+    p.sopp('s_endpgm')
+    pokes = [f"poke 0 {32 + 4 * k} {w}" for k, w in enumerate(ssharp)] + T.vsharp(0, 48, 2, 512) + T.vsharp(0, 64, 3, 512)
+    init = _mip_init(lambda v: struct.pack('<f', v))
+    image = f"image 1 {MIP_SIZE} {MIP_SIZE} format 22 mips {MIP_LEVELS} init {init}"
+    r = T.run(p.bytes(), {0: (256, None), 2: (512, None), 3: (512, coords)}, pokes, extra=[image, "timg 0 0 1"])
+    got = struct.unpack('<128f', r[2][:512])
+    want = _gather_clamp_expected(lanes)
+    assert got == want, [(i, got[i], want[i]) for i in range(128) if got[i] != want[i]][:8]
+
+TESTS = [test_resinfo_reports_the_image_extent, test_store_rgba8_unorm, test_store_r32_uint, test_load_3d_r32_uint, test_load_1d_r32_uint, test_sampler_from_guest_ssharp, test_load_cube_array_r32_uint, test_store_cube_array_r32_uint, test_sample_cube_face_coordinates, test_sample_cube_array_layer, test_load_mip_r32_uint, test_sample_explicit_lod_point_mip, test_sample_grad_lod_clamp, test_gather4_lod_clamp, test_gather4_lod_clamp_offset, test_gather4_bias_lod_clamp, test_load_bc1_unorm, test_load_bc3_unorm]
 
 if __name__ == "__main__":
     bad = 0

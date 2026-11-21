@@ -1070,14 +1070,22 @@ std::uint32_t EmitTwoDimensionalGatherLod(SpirvValueEmitContext& ctx, const Imag
     const auto atLeastOne = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, u32, atLeastOne, GlslStd450(state), GLSLstd450UMax, levels, ConstantU32(state, 1u));
     const auto lastLevel = Unary(state, spv::OpConvertUToF, f32, Binary(state, spv::OpISub, u32, atLeastOne, ConstantU32(state, 1u)));
-    const auto biased = Binary(state, spv::OpFAdd, f32, AddressF32(ctx, access, setup.layout.lod), bias);
+    const auto baseInputLod = setup.layout.lod != NoImageComponent ? AddressF32(ctx, access, setup.layout.lod)
+        : setup.layout.bias != NoImageComponent ? AddressF32(ctx, access, setup.layout.bias)
+        : ZeroF32(state);
+    const auto biased = Binary(state, spv::OpFAdd, f32, baseInputLod, bias);
     const auto atLeastMin = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, f32, atLeastMin, GlslStd450(state), GLSLstd450NMax, biased, fixedLod(field(0u, 0xfffu)));
     const auto ceiling = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, f32, ceiling, GlslStd450(state), GLSLstd450NMin, atLeastMin, fixedLod(field(12u, 0xfffu)));
     const auto imageMinLod = fixedLod(state.module.SpecializationConstant(u32, PipelineSpecialization::GatherImageMinLodBase + access.mem.resource, 0u));
-    const auto raised = state.module.AllocateId();
+    auto raised = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, f32, raised, GlslStd450(state), GLSLstd450NMax, ceiling, imageMinLod);
+    if (setup.layout.clamp != NoImageComponent) {
+        const auto clamped = state.module.AllocateId();
+        state.module.AddFunction(spv::OpExtInst, f32, clamped, GlslStd450(state), GLSLstd450NMax, raised, AddressF32(ctx, access, setup.layout.clamp));
+        raised = clamped;
+    }
     const auto lod = FloatClamp(state, raised, ZeroF32(state), lastLevel);
     const auto rounded = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, f32, rounded, GlslStd450(state), GLSLstd450Ceil, Binary(state, spv::OpFAdd, f32, lod, ConstantF32(state, 0x3f000000u)));
@@ -1104,6 +1112,14 @@ std::uint32_t EmitTwoDimensionalGatherLod(SpirvValueEmitContext& ctx, const Imag
         const auto floored = state.module.AllocateId();
         state.module.AddFunction(spv::OpExtInst, f32, floored, GlslStd450(state), GLSLstd450Floor, scaled);
         first[axis] = Unary(state, spv::OpConvertFToS, i32, FloatClamp(state, floored, ConstantF32(state, 0xcb800000u), ConstantF32(state, 0x4b800000u)));
+    }
+    if (setup.layout.offset != NoImageComponent) {
+        const auto packed = PackedOffset(ctx, access, setup.layout);
+        for (std::uint32_t axis = 0; axis < 2u; axis++) {
+            const auto off = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeExtract, i32, off, packed, axis);
+            first[axis] = Binary(state, spv::OpIAdd, i32, first[axis], off);
+        }
     }
     const auto vectorType = ImageVectorType(state, setup.numericClass, 4);
     const auto scalarType = ImageScalarType(state, setup.numericClass);
@@ -1819,7 +1835,8 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     auto& state = ctx.state;
     const auto& mem = access.mem;
     const auto dimension = access.image.dimension;
-    if (setup.layout.clamp != NoImageComponent) {
+    const bool canEmulate2dGatherLod = !setup.dref && dimension == RdnaImageDimension::Dim2D && !access.image.cube && !access.image.remappedDepth1D && !HasFlag(mem, RdnaImageSampleFlagGatherHorizontal) && state.program.Info().images.at(mem.resource).table == NoTable && state.program.Info().samplers.at(mem.sampler).table == NoTable;
+    if (setup.layout.clamp != NoImageComponent && !canEmulate2dGatherLod) {
         ctx.Fail(access.inst, "is a gather with an LOD clamp, which is not implemented");
     }
     if (setup.dref && (access.image.emulatedCompare & EmulatedCompare::Enabled) != 0u) {
@@ -1858,6 +1875,7 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
         words.push_back(spv::ImageOperandsConstOffsetsMask);
         words.push_back(HorizontalOffsets(ctx, access));
     } else if (setup.layout.offset != NoImageComponent) {
+        state.module.EmitCapability(spv::CapabilityImageGatherExtended);
         words.push_back(spv::ImageOperandsOffsetMask);
         words.push_back(PackedOffset(ctx, access, setup.layout));
     }
@@ -1877,7 +1895,7 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
         gathered = state.module.AllocateId();
         state.module.AddFunction(spv::OpCompositeConstruct, ImageVectorType(state, resultNumericClass, 4), gathered, component, component, component, component);
     }
-    if (HasFlag(mem, RdnaImageSampleFlagLod) && setup.layout.lod != NoImageComponent && !setup.dref && dimension == RdnaImageDimension::Dim2D && !access.image.cube && !access.image.remappedDepth1D && setup.layout.offset == NoImageComponent && !HasFlag(mem, RdnaImageSampleFlagGatherHorizontal) && state.program.Info().images.at(mem.resource).table == NoTable && state.program.Info().samplers.at(mem.sampler).table == NoTable) {
+    if (canEmulate2dGatherLod && ((HasFlag(mem, RdnaImageSampleFlagLod) && setup.layout.lod != NoImageComponent && setup.layout.offset == NoImageComponent) || setup.layout.clamp != NoImageComponent)) {
         const auto fetched = EmitTwoDimensionalGatherLod(ctx, access, setup);
         const auto supported = GatherLodSupported(state, mem.sampler);
         const auto scalarType = ImageScalarType(state, resultNumericClass);
@@ -2109,13 +2127,13 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     const bool descriptorClamp = state.shaderImageMinLod && state.program.Info().images.at(mem.resource).table == NoTable;
     if (descriptorClamp && state.registrationModules) ctx.Fail(access.inst, "applies its T#'s minimum LOD clamp in the shader, which registration modules do not implement");
     if (setup.layout.clamp != NoImageComponent || descriptorClamp) {
-        const auto& capabilities = state.supportedCapabilities;
-        if (std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityMinLod)) == capabilities.end()) ctx.Fail(access.inst, "clamps its LOD, which needs the device's shaderResourceMinLod");
         lodClamp = setup.layout.clamp != NoImageComponent ? AddressF32(ctx, access, setup.layout.clamp) : 0u;
         lodViewClamp = descriptorClamp ? Unary(state, spv::OpBitcast, TypeF32(state), state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::MinLodBase + mem.resource, 0u)) : 0u;
         if ((operandMask & spv::ImageOperandsLodMask) != 0u) {
             operands.back() = clampLod(operands.back());
         } else {
+            const auto& capabilities = state.supportedCapabilities;
+            if (std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityMinLod)) == capabilities.end()) ctx.Fail(access.inst, "clamps its LOD, which needs the device's shaderResourceMinLod");
             state.module.EmitCapability(spv::CapabilityMinLod);
             operandMask |= spv::ImageOperandsMinLodMask;
             operands.push_back(lodClamp == 0u ? lodViewClamp : lodViewClamp == 0u ? lodClamp : fmax(lodClamp, lodViewClamp));
