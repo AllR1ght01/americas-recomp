@@ -1,5 +1,7 @@
 #ifdef _WIN32
+#ifndef _CRT_RAND_S
 #define _CRT_RAND_S
+#endif
 #endif
 #include "prx/libc/include/HostEntropy.hpp"
 
