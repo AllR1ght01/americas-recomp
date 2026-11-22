@@ -132,10 +132,12 @@ Checks (RTX 5090, driver 617.42, and WARP):
   with the two buffer addresses read from a constant buffer (real GPU addresses are not known in advance). With
   `PT_DUMP=<prefix>`, `address_check.py check` compares the result: 0 mismatches at 1,024 and 16,384 threads on both adapters, atomics included.
 - `bvh_test` (it now wraps the device with `WrapDevice`; `BVH_PLAIN_PROXY=1` uses the bare proxy), `BVH_REPLACE_DIR` = `lower_all.py` output:
-  failures go from 42 to 21. The heap flag was not the only cause: `lower_all.py` pinned the wave size to 64 for every shader that indexes the heap, and the
-  RTX 5090 rejects `WaveSize(64)`. It now pins only shaders that use wave operations. Of the 31 address-using shaders, 21 use no wave operation and are
-  created; 10 (00, 04, 31-36, 42, 44) also use wave operations, are pinned, and are rejected like the 11 pointer-free wave shaders (20-28, 49, 50).
-  The same 10 built unpinned are created too, so the proxy side covers all 31. Without the proxy the 42 failures stay.
+  failures go from 42 to 9 on the RTX 5090. The heap flag was not the only cause: `lower_all.py` pinned the wave size to 64 for every shader that
+  indexes the heap, and the RTX 5090 rejects `WaveSize(64)`. It now pins only shaders whose result can depend on the wave size
+  (`xbox_dxil_lower.needs_wave64`): the 10 address-using shaders with wave operations (00, 04, 31-36, 42, 44) and 2 pointer-free ones (21, 22) run
+  groups of 32 threads, or use only swizzles that stay inside 32 lanes, so they are left unpinned and created. The 9 still rejected need 64-lane waves:
+  20 and 28 (ballots, `MakeUniform`), 23-27 (a scan that reads lane 31 into lanes 32-63) and 49, 50 (standard wave operations on 64-thread groups).
+  Without the proxy the 42 failures stay.
 - Not checked: any real build or rehydrate. The builder's constructor creates no buffers (0 ranges recorded), and the build calls need the
   game's geometry and the matching vertex/index buffers.
 - Known limits: the table and the descriptors are rewritten in place, so a buffer created or released while a builder dispatch is in flight can race with it
