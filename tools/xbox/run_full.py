@@ -11,7 +11,8 @@ Same drivers and defaults as run_corpus_bind.py (compute, driver_heap.exe, fake-
 run_graphics_final.py (PS/VS/MS, driver_gfx2.exe (XBOX_DRIVER_GFX overrides), PS both strict and with XBOX_ALLOW_UNMEASURED_F16_INTERP, barycentric extension
 retry). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
 killed run can be resumed by passing its own output as --skip. Stage '?' in the manifest is mesh (type 6/7), GS has no driver mode and
-is recorded as SKIP."""
+is recorded as SKIP. The wave size passed to the driver is 64 for a program that changes exec only with 64-bit SALU ops, else 32;
+XBOX_WAVE=32 or 64 forces one size for every shader."""
 import subprocess, csv, sys, collections, concurrent.futures as cf, json, os, time
 sys.path.insert(0, os.environ.get("XBOX_RDNA2_DIR", r"E:/Programming/rpf9shaders/out_disasm"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # harness_guard, canary (python -I does not add it)
@@ -50,6 +51,25 @@ def attrs(idx):
     return (max(a) + 1 if a else 0, sum(1 << x for x in set(f)))
 
 
+def wave(idx):
+    forced = os.environ.get("XBOX_WAVE", "auto")
+    if forced != "auto":
+        return forced
+    d = open(BINS + f"{idx}.bin", "rb").read()
+    ins, _ = rdna2.sweep(d, 0, len(d))
+    narrow = wide = False
+    for i in ins:
+        if i.fmt not in ("SOP1", "SOP2"):
+            continue
+        w = i.words[0]
+        operands = [(w >> 16) & 0x7F, w & 0xFF] + ([(w >> 8) & 0xFF] if i.fmt == "SOP2" else [])
+        if "saveexec" not in i.name and 126 not in operands:
+            continue
+        wide = wide or i.name.endswith("_b64")
+        narrow = narrow or i.name.endswith("_b32")
+    return "64" if wide and not narrow else "32"
+
+
 def classify(cmd, spv, env):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=LIMIT, env=env)
@@ -69,7 +89,7 @@ def compute(idx):
     os.makedirs("spv_full", exist_ok=True)
     for v in (None, 0, 2, 3):          # None = the driver's default (zeros), 0 = unbacked, 2 = tiled T# records, 3 = tiled V# records
         spv = f"spv_full/{idx}.{v}.spv"
-        cmd = [DRIVER_CS, BINS + f"{idx}.bin", "32", spv, BINDS + f"{idx}.bind"] + ([str(v)] if v is not None else [])
+        cmd = [DRIVER_CS, BINS + f"{idx}.bin", wave(idx), spv, BINDS + f"{idx}.bind"] + ([str(v)] if v is not None else [])
         s, d = classify(cmd, spv, dict(os.environ))
         if os.path.exists(spv):
             os.remove(spv)
@@ -89,7 +109,7 @@ def graphics(idx, st, relaxed):
         e = dict(env)
         if bary:
             e["XBOX_FRAGMENT_BARY"] = "1"
-        cmd = [DRIVER_GFX, BINS + f"{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
+        cmd = [DRIVER_GFX, BINS + f"{idx}.bin", wave(idx), spv, BINDS + f"{idx}.bind", "1", st]
         if st == "ps":
             n, mask = attrs(idx)
             cmd += ["2", str(n), "%x" % mask]
@@ -124,7 +144,7 @@ def _logic_hash():
     global _LOGIC
     if _LOGIC is None:
         import hashlib, inspect
-        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (attrs, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
+        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (attrs, wave, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
     return _LOGIC
 
 

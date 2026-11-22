@@ -26,7 +26,8 @@ Experimental tooling for running Xbox Series shader code through the shader reco
    directory `python -I tools/xbox/run_full.py out.json --no-canary` with `XBOX_CORPUS=<dir>`, `XBOX_SPIRV_VAL=<spirv-val>` and
    `XBOX_DRIVER_CS` / `XBOX_DRIVER_GFX` set to the `driver.exe` that `build_msvc.py` builds (`XBOX_BUILD` holds the result cache).
    The carver numbers shaders in archive order, which is not the numbering of `docs/xbox/results.json` and `canary.json`, so only
-   per-stage totals compare, and the canaries are refused on a carved corpus.
+   per-stage totals compare, and the canaries are refused on a carved corpus. Each shader runs at the wave size its exec-mask
+   instructions imply (64 when they are all 64-bit); `XBOX_WAVE=32` restores the earlier fixed size.
 3. `driver.exe <code.bin> <wave 32|64> <out.spv> [user_data_dwords]` recompiles one compute shader with stubbed
    bindings (user-data pointer pairs backed by fake buffer-descriptor memory).
 4. `run_batch.py` runs the driver over a directory of blobs and validates with `spirv-val`.
