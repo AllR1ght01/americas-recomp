@@ -470,6 +470,13 @@ class TestEndToEndBoxRehydration(unittest.TestCase):
         bvh.rehydrate_box32(bytes(src), dst, hier_off, 0x40, leaf_off, False, 1)
         box0 = struct.unpack_from("<6f", dst, hier_off + 16)
         self.assertEqual(box0, (1.0, 2.0, 3.0, 4.0, 8.0, 6.0))
+        root_id = ((hier_off >> 6) << 3) | bvh.NODE_TYPE_BOX32
+        dst[:64] = _make_bvh_header(
+            flags=bvh.BVH_FLAG_BLAS, total_bytes=total, num_leaves=1,
+            offset_to_hierarchy=hier_off, root_node_id=root_id, offset_to_leaves=leaf_off,
+        )
+        self.assertEqual(bvh.trace_blas(dst, (2.5, 3.5, 0), (0, 0, 1)),
+                         bvh.TriangleHit(4.5, tri1_id, 0, 1))
 
         src_k1 = bytearray(0x200)
         flags_k1 = bvh.BVH_FLAG_BLAS | bvh.BVH_FLAG_COMPRESSED | (1 << 20)
@@ -526,6 +533,38 @@ class TestEndToEndBoxRehydration(unittest.TestCase):
         still_comp[:64] = _make_bvh_header(total_bytes=0x100, offset_to_leaves=0x80, root_node_id=((0x80 >> 6) << 3))
         rep = bvh.validate_rehydrated_bvh(bytes(still_comp), check_parent_pointers=False)
         self.assertFalse(rep.valid)
+
+
+class TestBvhTraversal(unittest.TestCase):
+    def test_nearest_hit_miss_and_interval(self):
+        for box_type, fmt in ((bvh.NODE_TYPE_BOX16, "<6e"), (bvh.NODE_TYPE_BOX32, "<6f")):
+            with self.subTest(box_type=box_type):
+                leaf_off, root_off, total = 0x40, 0xC0, 0x140
+                far_id, near_id = 8, 16
+                root_id = ((root_off >> 6) << 3) | box_type
+                buf = bytearray(total)
+                buf[:64] = _make_bvh_header(
+                    flags=bvh.BVH_FLAG_BLAS, total_bytes=total, num_leaves=2,
+                    aabb_min=(0, 0, 2), aabb_max=(1, 1, 4),
+                    offset_to_hierarchy=root_off, root_node_id=root_id,
+                    offset_to_leaves=leaf_off, offset_to_parent_data=0,
+                    transform_word=bvh.DEFAULT_TRANSFORM_WORD,
+                )
+                struct.pack_into("<4I", buf, root_off, near_id, far_id, bvh.INVALID_NODE, bvh.INVALID_NODE)
+                for slot, z in enumerate((2, 4)):
+                    struct.pack_into(fmt, buf, root_off + 16 + slot * struct.calcsize(fmt), 0, 0, z, 1, 1, z)
+                for offset, z, prim in ((leaf_off, 4, 7), (leaf_off + 64, 2, 9)):
+                    struct.pack_into("<9f", buf, offset, 0, 0, z, 1, 0, z, 0, 1, z)
+                    struct.pack_into("<3I", buf, offset + 48, 3 << 8, prim, bvh.INVALID_NODE)
+
+                origin, direction = (0.25, 0.25, 0), (0, 0, 2)
+                self.assertEqual(bvh.trace_blas(buf, origin, direction), bvh.TriangleHit(1, near_id, 3, 9))
+                self.assertEqual(bvh.trace_blas(buf, origin, direction, 1.5, 2), bvh.TriangleHit(2, far_id, 3, 7))
+                self.assertIsNone(bvh.trace_blas(buf, origin, direction, t_max=0.5))
+                self.assertIsNone(bvh.trace_blas(buf, (2, 0, 0), direction))
+                self.assertIsNone(bvh.trace_blas(buf, (0.75, 0.75, 0), direction))
+                self.assertEqual(bvh.trace_blas(buf, (0, 0, 6), (0, 0, -1)),
+                                 bvh.TriangleHit(2, far_id, 3, 7))
 
 
 if __name__ == "__main__":
