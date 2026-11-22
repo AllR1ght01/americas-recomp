@@ -365,10 +365,19 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     simplify();
     if (stageKind == ShaderStageKind::Pixel && !translateOptions.fragmentShaderBarycentricEnabled) program.Metadata().barycentricBuiltinsUnnormalized = request.target.fragmentBarycentricBuiltins && !hostInterpolationFirst;
     if (stageKind == ShaderStageKind::Pixel && !translateOptions.fragmentShaderBarycentricEnabled && !HostInterpolationChecker{}.Lower(program, *inputInfo.pixel, request.target.fragmentBarycentricBuiltins && !hostInterpolationFirst, !hostInterpolationFirst)) {
+        constexpr HostInterpolationChecker checker;
+        std::uint32_t hostInputs = hostInterpolationFirst ? 0u : checker.HostInterpolatedInputs(program, *inputInfo.pixel);
         translateOptions.fragmentShaderBarycentricEnabled = true;
-        program = translator.Translate(decoded, cfg, translateOptions);
-        program.Metadata().barycentricEmulation = !hostInterpolationFirst;
-        simplify();
+        while (true) {
+            translateOptions.hostInterpolatedInputs = hostInputs;
+            program = translator.Translate(decoded, cfg, translateOptions);
+            program.Metadata().barycentricEmulation = !hostInterpolationFirst;
+            simplify();
+            if (hostInputs == 0u) break;
+            std::uint32_t failedInputs = 0u;
+            if (checker.LowerHostInputs(program, *inputInfo.pixel, failedInputs)) break;
+            hostInputs = failedInputs != 0u ? (hostInputs & ~failedInputs) : 0u;
+        }
     }
 
     constexpr DenormalFlushEliminator denormalFlushEliminator;
@@ -856,7 +865,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
         targetOptions.barycentricSmoothLocation = layout.smoothLocation;
         targetOptions.barycentricLinearLocation = layout.linearLocation;
         targetOptions.barycentricPositionsLocation = layout.positionsLocation;
-        targetOptions.meshExportedLocations = emulated.passed;
+        for (std::size_t i = 0; i < emulated.passed.size(); ++i) targetOptions.meshExportedLocations.emplace_back(emulated.passed[i], emulated.passedLocations[i]);
         for (const auto& parameter : emulated.perVertex) targetOptions.meshPerVertexLocations.emplace_back(parameter.sourceLocation, parameter.location);
         if (!request.graphics->mesh || !request.target.mesh) throw std::runtime_error("barycentric emulation on the mesh path needs a mesh configuration and a device with mesh shaders");
         const auto& config = *request.graphics->mesh;
@@ -868,7 +877,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
         MeshOutputUse use;
         std::set<std::uint32_t> flatLocations;
         for (const auto& output : program.Info().outputs) {
-            if (output.kind == StageOutputKind::Parameter && std::ranges::find(targetOptions.meshExportedLocations, output.location) != targetOptions.meshExportedLocations.end()) flatLocations.insert(output.location);
+            if (output.kind == StageOutputKind::Parameter && std::ranges::any_of(targetOptions.meshExportedLocations, [&](const auto& entry) { return entry.first == output.location; })) flatLocations.insert(output.location);
             if (output.kind == StageOutputKind::ClipDistance) use.clipDistances = std::max(use.clipDistances, output.index + 1u);
             if (output.kind == StageOutputKind::CullDistance) use.cullDistances = std::max(use.cullDistances, output.index + 1u);
             if (output.kind == StageOutputKind::Layer) use.layer = true;

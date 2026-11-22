@@ -3,6 +3,7 @@
 #include "IntermediateRepresentation/IrMetadata/StageIO.hpp"
 #include "Optimization/DeadCodeEliminator.hpp"
 #include "Optimization/MaskedSelectEliminator.hpp"
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -160,6 +161,158 @@ bool HostInterpolationChecker::Lower(IrProgram& program, const ShaderPixelInputI
     }
     if (smooth && noPerspective) return false;
     program.Metadata().pixelFirstVertexInputs = firstVertex;
+    return true;
+}
+
+std::uint32_t HostInterpolationChecker::HostInterpolatedInputs(const IrProgram& program, const ShaderPixelInputInfo& pixel) const {
+    const auto& metadata = program.Metadata();
+    std::uint32_t hasInterpolated = 0u;
+    std::uint32_t blocked = metadata.pixelLinearInputs & metadata.pixelPerspectiveInputs;
+    std::array<bool, 32> read {};
+    std::vector<IrValue*> scratchSelects;
+    const auto inputLimit = std::min<std::uint32_t>(pixel.inputNum, 32u);
+    for (const auto& block : program.Blocks()) {
+        for (const IrValue* inst : block->Instructions()) {
+            const auto opcode = inst->Opcode();
+            if (opcode == IrOpcode::GetAttribute) {
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                if (input >= inputLimit) continue;
+                read[input] = true;
+                hasInterpolated |= 1u << input;
+                if (pixel.InputIsDefault(input) || pixel.InputIsCustom(input)) blocked |= 1u << input;
+            } else if (opcode == IrOpcode::InterpolateHostP1 || opcode == IrOpcode::InterpolateHostP2) {
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                if (input >= inputLimit) continue;
+                read[input] = true;
+                hasInterpolated |= 1u << input;
+                if (!exact(*inst, program, pixel, 0u, scratchSelects)) blocked |= 1u << input;
+            } else if (opcode == IrOpcode::GetInterpolationParameter) {
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                if (input >= inputLimit || pixel.InputIsDefault(input)) continue;
+                read[input] = true;
+                const auto mode = inst->Argument(2)->Resolve()->ImmediateU32();
+                if (!(mode == 2u && pixel.InputIsFlat(input))) blocked |= 1u << input;
+            } else if (opcode == IrOpcode::GetInterpolationParameterF16) {
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                const bool high = inst->Argument(3)->Resolve()->ImmediateU32() != 0u;
+                if (input >= inputLimit || pixel.InputHalfIsDefault(input, high)) continue;
+                read[input] = true;
+                blocked |= 1u << input;
+            }
+        }
+    }
+    constexpr std::uint32_t unassigned = 3u;
+    std::array<std::uint32_t, 32> slotMode {};
+    slotMode.fill(unassigned);
+    std::array<bool, 32> slotBlocked {};
+    for (std::uint32_t input = 0u; input < inputLimit; ++input) {
+        if (!read[input]) continue;
+        const auto slot = pixel.InputSlot(input);
+        if ((blocked >> input & 1u) != 0u || pixel.InputIsCustom(input)) {
+            slotBlocked[slot] = true;
+            continue;
+        }
+        if (pixel.InputIsDefault(input)) continue;
+        const auto mode = pixel.InputIsFlat(input) ? 2u : pixel.InputIsLinear(input, metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs) ? 1u : 0u;
+        if (slotMode[slot] == unassigned) slotMode[slot] = mode;
+        else if (slotMode[slot] != mode) slotBlocked[slot] = true;
+    }
+    std::uint32_t result = 0u;
+    for (std::uint32_t input = 0u; input < inputLimit; ++input) {
+        if ((hasInterpolated >> input & 1u) == 0u || (blocked >> input & 1u) != 0u) continue;
+        if (pixel.InputIsDefault(input) || pixel.InputIsCustom(input)) continue;
+        if (slotBlocked[pixel.InputSlot(input)]) continue;
+        result |= 1u << input;
+    }
+    return result;
+}
+
+bool HostInterpolationChecker::LowerHostInputs(IrProgram& program, const ShaderPixelInputInfo& pixel, std::uint32_t& failedInputs) const {
+    failedInputs = 0u;
+    const auto inputLimit = std::min<std::uint32_t>(pixel.inputNum, 32u);
+    const auto expandSlots = [&](std::uint32_t mask) {
+        std::array<bool, 32> badSlot {};
+        for (std::uint32_t input = 0u; input < inputLimit; ++input) {
+            if ((mask >> input & 1u) != 0u) badSlot[pixel.InputSlot(input)] = true;
+        }
+        std::uint32_t expanded = mask;
+        for (std::uint32_t input = 0u; input < inputLimit; ++input) {
+            if (badSlot[pixel.InputSlot(input)]) expanded |= 1u << input;
+        }
+        return expanded;
+    };
+    const auto mixed = program.Metadata().pixelLinearInputs & program.Metadata().pixelPerspectiveInputs;
+    std::vector<IrValue*> selects;
+    for (const auto& block : program.Blocks()) {
+        for (const IrValue* inst : block->Instructions()) {
+            const auto opcode = inst->Opcode();
+            if (opcode != IrOpcode::InterpolateHostP1 && opcode != IrOpcode::InterpolateHostP2 && opcode != IrOpcode::GetAttribute) continue;
+            const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+            if (input >= inputLimit || (mixed >> input & 1u) != 0u) {
+                if (input < 32u) failedInputs |= 1u << input;
+                continue;
+            }
+            if (opcode != IrOpcode::GetAttribute && !exact(*inst, program, pixel, 0u, selects)) {
+                failedInputs |= 1u << input;
+            }
+        }
+    }
+    if (failedInputs != 0u) {
+        failedInputs = expandSlots(failedInputs);
+        return false;
+    }
+    for (auto* select : selects) select->ReplaceAllUsesWith(select->Argument(2));
+    for (const auto& block : program.Blocks()) {
+        auto& instructions = block->Instructions();
+        for (auto it = instructions.begin(); it != instructions.end();) {
+            IrValue* inst = *it;
+            if (inst->Opcode() != IrOpcode::InterpolateHostP2) {
+                ++it;
+                continue;
+            }
+            inst->Invalidate();
+            inst->SetParent(nullptr);
+            it = instructions.erase(it);
+        }
+    }
+    DeadCodeEliminator{}.Eliminate(program);
+    if (MaskedSelectEliminator{}.Eliminate(program).removedSelects != 0u) DeadCodeEliminator{}.Eliminate(program);
+    for (const auto& block : program.Blocks()) {
+        for (const IrValue* inst : block->Instructions()) {
+            if (inst->Opcode() == IrOpcode::InterpolateHostP1) {
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                if (input < 32u) failedInputs |= 1u << input;
+            }
+        }
+    }
+    if (failedInputs != 0u) {
+        failedInputs = expandSlots(failedInputs);
+        return false;
+    }
+    std::uint32_t firstVertex = firstVertexInputs(program, pixel);
+    if (firstVertex != 0u) {
+        std::array<bool, 32> slotConflict {};
+        for (const auto& block : program.Blocks()) {
+            for (const IrValue* inst : block->Instructions()) {
+                const auto opcode = inst->Opcode();
+                if (opcode != IrOpcode::GetAttribute && opcode != IrOpcode::GetInterpolationParameter && opcode != IrOpcode::GetInterpolationParameterF16) continue;
+                const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
+                if (input >= inputLimit) continue;
+                if (opcode == IrOpcode::GetInterpolationParameterF16) {
+                    const bool high = inst->Argument(3)->Resolve()->ImmediateU32() != 0u;
+                    if (!pixel.InputHalfIsDefault(input, high)) slotConflict[pixel.InputSlot(input)] = true;
+                    continue;
+                }
+                if (pixel.InputIsDefault(input)) continue;
+                const bool flatOnly = opcode == IrOpcode::GetInterpolationParameter && inst->Argument(2)->Resolve()->ImmediateU32() == 2u && (pixel.InputIsFlat(input) || (firstVertex >> input & 1u) != 0u);
+                if (!flatOnly) slotConflict[pixel.InputSlot(input)] = true;
+            }
+        }
+        for (std::uint32_t input = 0u; input < inputLimit; ++input) {
+            if ((firstVertex >> input & 1u) != 0u && slotConflict[pixel.InputSlot(input)]) firstVertex &= ~(1u << input);
+        }
+        program.Metadata().pixelFirstVertexInputs = firstVertex;
+    }
     return true;
 }
 

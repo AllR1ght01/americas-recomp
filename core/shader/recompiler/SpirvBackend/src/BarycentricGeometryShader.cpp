@@ -45,7 +45,7 @@ public:
         perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
     }
 
-    std::vector<std::uint32_t> Emit(const std::vector<std::uint32_t>& passed, const std::vector<PerVertexParameter>& perVertex, const BarycentricEmulationLayout& layout) {
+    std::vector<std::uint32_t> Emit(const std::vector<std::uint32_t>& passed, const std::vector<std::uint32_t>& passedLocations, const std::vector<PerVertexParameter>& perVertex, const BarycentricEmulationLayout& layout) {
         builder.EmitCapability(spv::CapabilityShader);
         builder.EmitCapability(spv::CapabilityGeometry);
         main = result(spv::OpFunction, voidType, spv::FunctionControlMaskNone, functionType);
@@ -65,9 +65,9 @@ public:
         const auto position = addInterface(spv::StorageClassOutput, vec4FloatType);
         decorate(position, spv::DecorationBuiltIn, spv::BuiltInPosition);
         std::vector<std::uint32_t> passedOutputs;
-        for (const auto location : passed) {
+        for (std::size_t i = 0; i < passed.size(); ++i) {
             passedOutputs.push_back(addInterface(spv::StorageClassOutput, vec4FloatType));
-            decorate(passedOutputs.back(), spv::DecorationLocation, location);
+            decorate(passedOutputs.back(), spv::DecorationLocation, passedLocations[i]);
         }
         const auto barycentricOutput = [&](std::uint32_t location) {
             if (location == BarycentricEmulationLayout::NoLocation) return 0u;
@@ -235,7 +235,7 @@ public:
         return finish();
     }
 
-    std::vector<std::uint32_t> EmitEvaluation(const std::vector<std::uint32_t>& sources, const std::vector<std::uint32_t>& passed, const std::vector<bool>& passedFlat, const std::vector<PerVertexParameter>& perVertex, const BarycentricEmulationLayout& layout, std::uint32_t provokingVertex) {
+    std::vector<std::uint32_t> EmitEvaluation(const std::vector<std::uint32_t>& sources, const std::vector<std::uint32_t>& passed, const std::vector<std::uint32_t>& passedLocations, const std::vector<bool>& passedFlat, const std::vector<PerVertexParameter>& perVertex, const BarycentricEmulationLayout& layout, std::uint32_t provokingVertex) {
         begin();
         addDomain();
         const auto tessCoord = addInterface(spv::StorageClassInput, vec3FloatType);
@@ -248,9 +248,9 @@ public:
         }
         const auto glOut = addInterface(spv::StorageClassOutput, stageVertexType);
         std::vector<std::uint32_t> passedOutputs;
-        for (const auto location : passed) {
+        for (std::size_t i = 0; i < passed.size(); ++i) {
             passedOutputs.push_back(addInterface(spv::StorageClassOutput, vec4FloatType));
-            decorate(passedOutputs.back(), spv::DecorationLocation, location);
+            decorate(passedOutputs.back(), spv::DecorationLocation, passedLocations[i]);
         }
         const auto barycentricOutput = [&](std::uint32_t location) {
             if (location == BarycentricEmulationLayout::NoLocation) return 0u;
@@ -380,22 +380,108 @@ BarycentricEmulationLayout LayoutBarycentricEmulation(std::span<const FragmentPa
         require(parameter.location < ParameterLocations, "fragment parameter location " + std::to_string(parameter.location) + " is out of range");
         if (!parameter.perVertex) used[parameter.location] = true;
     }
-    const auto take = [&](std::uint32_t count) {
-        for (std::uint32_t first = 0; first + count <= ParameterLocations; ++first) {
-            if (std::any_of(used.begin() + first, used.begin() + first + count, [](bool taken) { return taken; })) continue;
-            std::fill(used.begin() + first, used.begin() + first + count, true);
-            return first;
+    const auto allocate = [&](bool triplesFirst) -> std::optional<BarycentricEmulationLayout> {
+        auto slots = used;
+        BarycentricEmulationLayout candidate;
+        const auto take = [&](std::uint32_t count) -> std::optional<std::uint32_t> {
+            for (std::uint32_t first = 0; first + count <= ParameterLocations; ++first) {
+                if (std::any_of(slots.begin() + first, slots.begin() + first + count, [](bool taken) { return taken; })) continue;
+                std::fill(slots.begin() + first, slots.begin() + first + count, true);
+                return first;
+            }
+            return std::nullopt;
+        };
+        const auto takeSingle = [&](bool needed, std::uint32_t& out) -> bool {
+            if (!needed) return true;
+            const auto loc = take(1u);
+            if (!loc) return false;
+            out = *loc;
+            return true;
+        };
+        const auto takeTriples = [&]() -> bool {
+            if (meshPositions) {
+                const auto loc = take(3u);
+                if (!loc) return false;
+                candidate.positionsLocation = *loc;
+            }
+            for (const auto& parameter : parameters) {
+                if (!parameter.perVertex) continue;
+                const auto loc = take(3u);
+                if (!loc) return false;
+                candidate.perVertexLocations.emplace_back(parameter.location, *loc);
+            }
+            return true;
+        };
+        if (triplesFirst) {
+            if (!takeTriples()) return std::nullopt;
+            if (!takeSingle(emulation.smooth, candidate.smoothLocation)) return std::nullopt;
+            if (!takeSingle(emulation.linear, candidate.linearLocation)) return std::nullopt;
+            if (!takeSingle(emulation.smoothOffset, candidate.reciprocalWLocation)) return std::nullopt;
+        } else {
+            if (!takeSingle(emulation.smooth, candidate.smoothLocation)) return std::nullopt;
+            if (!takeSingle(emulation.linear, candidate.linearLocation)) return std::nullopt;
+            if (meshPositions) {
+                const auto loc = take(3u);
+                if (!loc) return std::nullopt;
+                candidate.positionsLocation = *loc;
+            }
+            if (!takeSingle(emulation.smoothOffset, candidate.reciprocalWLocation)) return std::nullopt;
+            for (const auto& parameter : parameters) {
+                if (!parameter.perVertex) continue;
+                const auto loc = take(3u);
+                if (!loc) return std::nullopt;
+                candidate.perVertexLocations.emplace_back(parameter.location, *loc);
+            }
         }
-        throw std::runtime_error("Barycentric geometry SPIR-V: the emulated barycentric inputs exceed " + std::to_string(ParameterLocations) + " locations");
+        return candidate;
     };
-    if (emulation.smooth) layout.smoothLocation = take(1u);
-    if (emulation.linear) layout.linearLocation = take(1u);
-    if (meshPositions) layout.positionsLocation = take(3u);
-    if (emulation.smoothOffset) layout.reciprocalWLocation = take(1u);
-    for (const auto& parameter : parameters) {
-        if (parameter.perVertex) layout.perVertexLocations.emplace_back(parameter.location, take(3u));
-    }
-    return layout;
+    const auto allocateCompact = [&]() -> std::optional<BarycentricEmulationLayout> {
+        BarycentricEmulationLayout candidate;
+        std::uint32_t cursor = 0u;
+        const auto take = [&](std::uint32_t count) -> std::optional<std::uint32_t> {
+            if (cursor + count > ParameterLocations) return std::nullopt;
+            const auto first = cursor;
+            cursor += count;
+            return first;
+        };
+        if (meshPositions) {
+            const auto loc = take(3u);
+            if (!loc) return std::nullopt;
+            candidate.positionsLocation = *loc;
+        }
+        for (const auto& parameter : parameters) {
+            if (!parameter.perVertex) continue;
+            const auto loc = take(3u);
+            if (!loc) return std::nullopt;
+            candidate.perVertexLocations.emplace_back(parameter.location, *loc);
+        }
+        for (const auto& parameter : parameters) {
+            if (parameter.perVertex) continue;
+            const auto loc = take(1u);
+            if (!loc) return std::nullopt;
+            candidate.passedLocations.emplace_back(parameter.location, *loc);
+        }
+        if (emulation.smooth) {
+            const auto loc = take(1u);
+            if (!loc) return std::nullopt;
+            candidate.smoothLocation = *loc;
+        }
+        if (emulation.linear) {
+            const auto loc = take(1u);
+            if (!loc) return std::nullopt;
+            candidate.linearLocation = *loc;
+        }
+        if (emulation.smoothOffset) {
+            const auto loc = take(1u);
+            if (!loc) return std::nullopt;
+            candidate.reciprocalWLocation = *loc;
+        }
+        return candidate;
+    };
+    if (auto result = allocate(false)) return *result;
+    if (auto result = allocate(true)) return *result;
+    if (auto result = allocateCompact()) return *result;
+    throw std::runtime_error("Barycentric geometry SPIR-V: the emulated barycentric inputs exceed " + std::to_string(ParameterLocations) + " locations");
 }
 
 EmulatedInterface DescribeEmulatedInterface(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation, bool meshPositions) {
@@ -404,6 +490,7 @@ EmulatedInterface DescribeEmulatedInterface(std::span<const FragmentParameter> p
     for (const auto& parameter : parameters) {
         if (!parameter.perVertex) {
             emulated.passed.push_back(parameter.sourceLocation);
+            emulated.passedLocations.push_back(emulated.layout.PassedLocation(parameter.location));
             emulated.passedFlat.push_back(parameter.flat);
             continue;
         }
@@ -432,7 +519,7 @@ RecompileResult BuildBarycentricGeometryShader(const RecompileResult& vertex, co
     require(limits->maxGeometryOutputVertices >= 3u && outputComponents <= limits->maxGeometryOutputComponents && 3u * outputComponents <= limits->maxGeometryTotalOutputComponents && inputComponents <= limits->maxGeometryInputComponents && fragmentComponents <= limits->maxFragmentInputComponents, "the emulated barycentric interface exceeds device limits");
     BarycentricGeometryEmitter emitter(target.spirvVersion);
     RecompileResult result;
-    result.spirv = emitter.Emit(emulated.passed, emulated.perVertex, emulated.layout);
+    result.spirv = emitter.Emit(emulated.passed, emulated.passedLocations, emulated.perVertex, emulated.layout);
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     result.spirv = ValidateAndOptimizeSpirv(result.spirv, target.vulkanVersion, target.spirvVersion);
 #endif
@@ -460,7 +547,7 @@ BarycentricTessellationShaders BuildBarycentricTessellationShaders(const Recompi
     const std::vector<std::uint32_t> sources(sourceSet.begin(), sourceSet.end());
     BarycentricTessellationShaders shaders;
     shaders.control.spirv = BarycentricTessellationEmitter(target.spirvVersion, clipDistances).EmitControl(sources);
-    shaders.evaluation.spirv = BarycentricTessellationEmitter(target.spirvVersion, clipDistances).EmitEvaluation(sources, emulated.passed, emulated.passedFlat, emulated.perVertex, emulated.layout, provokingVertex);
+    shaders.evaluation.spirv = BarycentricTessellationEmitter(target.spirvVersion, clipDistances).EmitEvaluation(sources, emulated.passed, emulated.passedLocations, emulated.passedFlat, emulated.perVertex, emulated.layout, provokingVertex);
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     shaders.control.spirv = ValidateAndOptimizeSpirv(shaders.control.spirv, target.vulkanVersion, target.spirvVersion);
     shaders.evaluation.spirv = ValidateAndOptimizeSpirv(shaders.evaluation.spirv, target.vulkanVersion, target.spirvVersion);

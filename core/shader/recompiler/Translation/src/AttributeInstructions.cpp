@@ -49,7 +49,7 @@ ExportFlags TranslationContext::addExportInfo(const RdnaInstruction& inst) {
 }
 
 void TranslationContext::vInterpP1F32(const RdnaInstruction& inst) {
-    if (!fragmentShaderBarycentricEnabled) {
+    if (useHostInterpolation(inst.source1.value)) {
         writeOperand(inst.destination, &ir.Emit(IrOpcode::InterpolateHostP1, IrType::F32, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value), readOperand(inst.source0, IrType::F32)}));
         return;
     }
@@ -61,7 +61,7 @@ void TranslationContext::vInterpP1F32(const RdnaInstruction& inst) {
 }
 
 void TranslationContext::vInterpP2F32(const RdnaInstruction& inst) {
-    if (fragmentShaderBarycentricEnabled) {
+    if (!useHostInterpolation(inst.source1.value)) {
         auto& delta = ir.Emit(IrOpcode::GetInterpolationParameter, IrType::U32, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value), &ir.Constant(1u)});
         auto& product = ir.Emit(IrOpcode::FPMul32, IrType::F32, {&ir.BitCastF32(delta), readOperand(inst.source0, IrType::F32)});
         auto& result = ir.Emit(IrOpcode::FPAdd32, IrType::F32, {&product, readOperand(inst.destination, IrType::F32)});

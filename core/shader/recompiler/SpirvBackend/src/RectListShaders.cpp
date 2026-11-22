@@ -505,7 +505,7 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
             emulation.perVertex.push_back({input.sourceLocation, relocated->second});
             continue;
         }
-        parameters.push_back({input.sourceLocation, input.location, input.flat, !exported});
+        parameters.push_back({input.sourceLocation, fragment.barycentricEmulation.active ? layout.PassedLocation(input.location) : input.location, input.flat, !exported});
     }
     const auto emulatedSlots = static_cast<std::uint32_t>(emulation.barycentrics.size() + emulation.perVertex.size() * 3u);
     const auto clipDistances = VertexClipDistanceCount(vertex.spirv.Words());

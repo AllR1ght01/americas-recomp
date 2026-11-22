@@ -339,8 +339,9 @@ void DefineInputs(SpirvEmitterState& state) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, state.meshBarycentricPixel ? spv::DecorationPerPrimitiveEXT : spv::DecorationFlat);
             } else if (input.perVertex) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationPerVertexKHR);
-            } else if (flat) {
-                state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
+            } else {
+                if (emulated) location = emulation.PassedLocation(location);
+                if (flat) state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
             }
             if (!flat && !input.perVertex && PixelParameterIsLinear(state, input.location)) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
