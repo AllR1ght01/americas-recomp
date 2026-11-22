@@ -33,6 +33,8 @@ extern "C" __declspec(dllexport) HRESULT WINAPI D3D12XboxCreateDevice(void* adap
     auto f = m ? (PFN_D3D12_CREATE_DEVICE)GetProcAddress(m, "D3D12CreateDevice") : nullptr;
     ID3D12Device* dev = nullptr;
     HRESULT hr = f ? f(nullptr, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), (void**)&dev) : E_NOTIMPL;
+    if (FAILED(hr) && f) hr = f(nullptr, D3D_FEATURE_LEVEL_11_1, __uuidof(ID3D12Device), (void**)&dev);
+    if (FAILED(hr) && f) hr = f(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), (void**)&dev);
     LogLine("D3D12XboxCreateDevice: PC device hr 0x%08lx\n", (unsigned long)hr);
     if (FAILED(hr)) return hr;
     *out = xbox_overrides::WrapDevice(dev);

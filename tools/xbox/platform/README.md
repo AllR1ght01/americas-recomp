@@ -9,6 +9,11 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
 * `make_platform_results.py <imports.json>` classifies each imported function (standard Windows / shipped in the package / needs a shim) and
   stores it under `"platform"` in `docs/xbox/results.json` for the progress map. Windows only.
 * `d3d12_xs_device.cpp` (build with `d3d12_xs.cpp`) adds `D3D12XboxCreateDevice`: a PC device behind the Xbox-ABI proxy with the deviations learned so far (`xbox_device_overrides.h`: descriptor heap handles in RAX, resource creation at slot 76). The parameter struct is only logged. On a device without typed-UAV support for `R9G9B9E5_SHAREDEXP` (NVIDIA), slot 76 creates a UAV resource of that format as `R16G16B16A16_FLOAT` (every RGB9E5 value is exact in f16; writes are not rounded to RGB9E5 and the memory layout differs) and slots 18/19 rewrite RGB9E5 views of it; `XS_NO_FORMAT_FALLBACK=1` keeps the original format. `XS_LOG` and `XS_TRACE=1` show what a title does with it.
+* `d3d12_xs_test.cpp` and `wine_d3d12.sh [work dir]` create a device through `D3D12XboxCreateDevice` under Wine, clear a
+  4x4 `R32G32B32A32_FLOAT` target to known words, copy it to a readback buffer and compare, and write `report.json`.
+  It exits 0 with `skipped: <reason>` when Wine, mingw-w64 or a D3D12 device is missing. Wine's DXGI reports a placeholder
+  adapter, so the physical GPU in the report comes from `vulkaninfo`; the stand-in falls back from feature level 12_0 to
+  11_1/11_0 because upstream vkd3d offers 11_1.
 * `xmem.cpp` is a stand-in `xmem.dll` (XMemAlloc, XMemFree, XMemGetWorkingSetStatistics, XMemVirtualQuery); `d3d12_xs.cpp` forwards the two
   `d3d12_xs.dll` functions the DLLs import to the PC `d3d12.dll`. Build each with `cl /LD /O2 file.cpp /Fe:name.dll`. Argument shapes were read from the callers' machine code;
   the allocation semantics and two output fields remain unverified. `XMEM_LOG=<file>` logs every call.

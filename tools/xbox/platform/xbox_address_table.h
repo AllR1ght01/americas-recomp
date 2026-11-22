@@ -252,8 +252,13 @@ static HRESULT AddHeapIndexingFlag(const void* blob, SIZE_T size, ID3DBlob** out
     hr = src ? S_OK : E_FAIL;
     if (src) {
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC copy = *src;
+#ifdef __MINGW32__
+        D3D12_ROOT_SIGNATURE_FLAGS* flags = copy.Version == D3D_ROOT_SIGNATURE_VERSION_1_0 ? &copy.Desc_1_0.Flags
+                                          : &copy.Desc_1_1.Flags;
+#else
         D3D12_ROOT_SIGNATURE_FLAGS* flags = copy.Version == D3D_ROOT_SIGNATURE_VERSION_1_0 ? &copy.Desc_1_0.Flags
                                           : copy.Version == D3D_ROOT_SIGNATURE_VERSION_1_1 ? &copy.Desc_1_1.Flags : &copy.Desc_1_2.Flags;
+#endif
         if (*flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) hr = S_FALSE;
         else {
             *flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;

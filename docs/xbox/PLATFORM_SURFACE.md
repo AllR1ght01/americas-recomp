@@ -214,6 +214,7 @@ counters, `PrintHits`) and lets selected slots be replaced. It is the starting p
 ## D3D12XboxCreateDevice (first graphics call of a title)
 `d3d12_xs_device.cpp` exports it: `(adapter, params, riid, out)` returns a PC `ID3D12Device` behind the Xbox-ABI proxy, with slot 14 (descriptor heaps, whose start handles come back in RAX) and slot 76
 (resource creation with the Xbox texture layout) overridden. Checked with a client that does what the package DLLs do: create the device, create a descriptor heap through slot 14, read the heap start through slot 9/10 (non-zero 8-byte values in RAX).
+`wine_d3d12.sh` runs this creation path under Wine (upstream vkd3d offers feature level 11_1, so the stand-in falls back from 12_0), then clears a texture, copies it to a readback buffer and compares the words on the underlying PC device, because the queue and fence slots on the Xbox device are not known.
 The signature and the `params` struct are from memory of the public documentation, not from a header: the struct is only logged (24 words), so a wrong layout cannot break creation, but its contents (command-queue ring size, scratch memory, debug flags) are unused.
 Not covered: presentation (`PresentX` on the queue, plane parameters), the command-list extensions, queue and fence creation (their slot numbers on the Xbox device are unknown beyond the ones listed above); `XS_TRACE=1` lists what a title calls.
 
