@@ -36,7 +36,10 @@ Lowered so far (more are added as shaders need them):
                            their result is the first atomic's. Sets the ResourceDescriptorHeapIndexing shader flag.
   llvm.copysign.f32        bit operations (the Xbox compiler leaves it; it is not a DXIL operation)
 Aggregates of up to four i32 (the x2/x3/x4 load results and store operands) are split into scalars like the pairs.
-The wave intrinsics assume the 64-lane waves the shaders were built for: run the result with the wave size pinned to 64 (dxil_sm66_wave.py).
+The wave intrinsics assume the 64-lane waves the shaders were built for: run the result with the wave size pinned to 64 (dxil_sm66_wave.py),
+unless needs_wave64() finds that the input cannot tell a 64-lane wave from two 32-lane ones: no WaveGetLaneCount, and a thread group of at most
+32 threads (lanes 32-63 of the wave are never active) or no standard wave operation and only lane-local intrinsics (LaneSwizzle, which
+stays inside its group of 32 lanes, and V_CNDMASK_B32 with a constant mask whose two dwords are equal). Such a shader is left unpinned, so it also runs on GPUs without 64-lane waves.
 """
 import re, sys
 
@@ -540,6 +543,29 @@ def lower(text):
     res = renumber(res)
     left = set(re.findall(r"call [^@\n]*@(xbox\.[\w.]+)\(", res))
     return res, n_lowered, left
+
+
+WAVE64_INTRINSICS = ("GetLaneID", "MakeUniform.", "ReadLane.", "Ballot64", "V_CNDMASK_B32", "MBCNT64", "S_BCNT1_U64", "WaveMin_U32")
+
+
+def needs_wave64(text):
+    if "@dx.op.waveGetLaneCount" in text:
+        return True
+    props = re.search(r"^!\d+ = !\{i32 0, i64 \d+(?:, i32 \d+, ![^,}]+)*?, i32 4, !(\d+)", text, re.M)
+    if props:
+        dims = re.search(r"^!%s = !\{i32 (\d+), i32 (\d+), i32 (\d+)\}" % props.group(1), text, re.M)
+        if dims and int(dims.group(1)) * int(dims.group(2)) * int(dims.group(3)) <= 32:
+            return False
+    if "@dx.op.wave" in text:
+        return True
+    for name, rest in re.findall(r"call [^@\n]*@xbox\.([\w.]+)\(i32 \d+([^\n]*)", text):
+        if name == "V_CNDMASK_B32":
+            mask = re.match(r", \{ i32, i32 \} \{ i32 (-?\d+), i32 (-?\d+) \}", rest)
+            if mask and mask.group(1) == mask.group(2):
+                continue
+        if name.startswith(WAVE64_INTRINSICS):
+            return True
+    return False
 
 
 if __name__ == "__main__":

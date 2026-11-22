@@ -15,7 +15,7 @@
 #include <vector>
 #include <csignal>
 using Microsoft::WRL::ComPtr;
-#include "xbox_device_proxy.h"
+#include "xbox_device_overrides.h"
 
 // Xbox device vtable slot 62: the builder's pipeline creation. Called as (desc, 0, 0, riid, ppv) with a D3D12_COMPUTE_PIPELINE_STATE_DESC
 // (root signature, shader bytecode, node mask, cached pso, flags). Treated here as the PC CreateComputePipelineState; the two zero
@@ -177,7 +177,9 @@ int main(int argc, char** argv) {
     void* obj = _aligned_malloc(1 << 20, 64);
     memset(obj, 0, 1 << 20);
     printf("constructing XboxBvhBuilder(device, false)...\n"); fflush(stdout);
-    XboxObjectProxy* proxy = XboxObjectProxy::Create(dev.Get());
+    XboxObjectProxy* proxy = getenv("BVH_PLAIN_PROXY") ? XboxObjectProxy::Create(dev.Get()) : xbox_overrides::WrapDevice(dev.Get());
+    auto* table = (xbox_address::Table*)proxy->context;
+    printf("address table: %s\n", table ? "on" : "off");
     g_dump = getenv("BVH_DUMP_DIR");
     proxy->Override(62, (void*)Slot62);
     if (unsigned long ex = SehCtor(ctor, obj, (ID3D12Device*)proxy)) {
@@ -188,6 +190,7 @@ int main(int argc, char** argv) {
     printf("  constructor returned\n");
     printf("pipelines requested %d, compiler crashes %d, other failures %d\n", g_pipe, g_crashed, g_failed);
     proxy->PrintHits("device");
+    if (table) printf("address table: %zu buffer ranges recorded\n", table->RangeCount());
     DumpMessages(dev.Get());
     if (morton64 && set64) set64(obj, true);
 

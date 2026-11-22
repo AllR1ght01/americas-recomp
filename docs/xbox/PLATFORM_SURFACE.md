@@ -103,8 +103,47 @@ The shader side is done (`xbox_dxil_lower.py`, table format in its docstring): w
 one range crossing 4 GiB, two decoy entries in a 4096-entry table: 0 mismatches over 1024 and 16384 threads and three seeds on the RTX 5090
 (driver 617.42) and on WARP. WARP rejects a pinned `WaveSize(32)` (`E_INVALIDARG`), so that kernel runs unpinned (`dxil_sm66_wave.py ... 0`).
 In `bvh_test` (RTX 5090, `BVH_REPLACE_DIR`) the 31 lowered shaders are rejected at pipeline creation (`E_INVALIDARG`), as expected: the
-game's root signatures lack `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`. Still to do (BVH-1 part 2): the proxy records each resource's address
-and size, keeps the table in a heap slot of its own, and adds that flag to the game's root signatures.
+game's root signatures lack `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`.
+
+**The proxy side of the address table (`xbox_address_table.h`, used by `xbox_overrides::WrapDevice`)**:
+- Recording: device slots 27 (`CreateCommittedResource`), 29 (`CreatePlacedResource`) and 76 (the Xbox resource creation) record every buffer
+  that has `ALLOW_UNORDERED_ACCESS` at its `GetGPUVirtualAddress()` and width, and give it a raw UAV descriptor. Buffers in a default heap get
+  that flag added (it does not change a buffer's layout; `XS_NO_BUFFER_UAV=1` turns this off). Upload and readback buffers cannot have a UAV,
+  so they are not recorded and an address inside one reads 0. A private-data interface attached to each recorded buffer is released by the
+  runtime when the buffer is destroyed, which removes its range and frees its descriptor slot.
+- The table: a 64 KiB buffer in a custom heap (write-combined, `L0`, UAV allowed), persistently mapped and rewritten from a sorted list on every
+  change, in the format the lowering reads: header (used entries, 4096, reserved slots, 0), then 4096 entries. Entry 0 is address 0 -> the null slot, and
+  every range's end gets an entry -> the null slot unless the next range starts there, so an address in a gap, below the first range or past the
+  last one reaches a null raw UAV (reads 0, writes are dropped) instead of the neighbouring buffer at a large offset. Ranges inside another range
+  are cut at the outer range's end; at one base the newer buffer wins. More than 4096 entries: the rest are dropped (counted).
+- How the shader finds it: every shader-visible CBV/SRV/UAV heap created through slot 14 is created 4096 descriptors larger, and the proxy heap's
+  `GetDesc`, `GetCPUDescriptorHandleForHeapStart` and `GetGPUDescriptorHandleForHeapStart` (slots 8-10) report the requested size and a start
+  4096 descriptors in, so the game never sees the reserved part. Descriptor 0 is the table (the lowering's default `ResourceDescriptorHeap[0]`,
+  so the lowering is unchanged), 1 is the null raw UAV and 2-4095 are the recorded buffers. They are written into every live shader-visible heap
+  (CPU writes to a shader-visible heap are allowed). No root constant is needed: whichever heap the game binds has the same layout at 0..4095.
+- Root signatures: slot 16 (`CreateRootSignature`) deserializes the blob, adds `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`, and reserializes it at its own
+  version (1.0 is converted to 1.1 if the runtime refuses the flag at 1.0); if anything fails the original blob is used.
+- Off when the device lacks resource binding tier 3 or shader model 6.6, or with `XS_NO_ADDRESS_TABLE=1`.
+
+Checks (RTX 5090, driver 617.42, and WARP):
+- `proxy_address_test.exe` (no arguments: the table builder and a software copy of the shader's binary search; with a kernel: the device side)
+  creates heaps, buffers (committed, placed, upload) and a root signature through the proxy, releases one buffer and checks that its slot is reused,
+  and that the lowered kernel is rejected with the unpatched signature and accepted with the proxy's. `proxy_address_kernel.ll` is `address_kernel.ll`
+  with the two buffer addresses read from a constant buffer (real GPU addresses are not known in advance). With
+  `PT_DUMP=<prefix>`, `address_check.py check` compares the result: 0 mismatches at 1,024 and 16,384 threads on both adapters, atomics included.
+- `bvh_test` (it now wraps the device with `WrapDevice`; `BVH_PLAIN_PROXY=1` uses the bare proxy), `BVH_REPLACE_DIR` = `lower_all.py` output:
+  failures go from 42 to 9 on the RTX 5090. The heap flag was not the only cause: `lower_all.py` pinned the wave size to 64 for every shader that
+  indexes the heap, and the RTX 5090 rejects `WaveSize(64)`. It now pins only shaders whose result can depend on the wave size
+  (`xbox_dxil_lower.needs_wave64`): the 10 address-using shaders with wave operations (00, 04, 31-36, 42, 44) and 2 pointer-free ones (21, 22) run
+  groups of 32 threads, or use only swizzles that stay inside 32 lanes, so they are left unpinned and created. The 9 still rejected need 64-lane waves:
+  20 and 28 (ballots, `MakeUniform`), 23-27 (a scan that reads lane 31 into lanes 32-63) and 49, 50 (standard wave operations on 64-thread groups).
+  Without the proxy the 42 failures stay.
+- Not checked: any real build or rehydrate. The builder's constructor creates no buffers (0 ranges recorded), and the build calls need the
+  game's geometry and the matching vertex/index buffers.
+- Known limits: the table and the descriptors are rewritten in place, so a buffer created or released while a builder dispatch is in flight can race with it
+  (a fresh table per command list would fix it); buffers created through `CreateCommittedResource1/2/3` or `CreatePlacedResource1/2` are not recorded
+  (the builder does not call them); descriptor heaps the game passes to a PC command list are still the proxy objects (the `SetDescriptorHeaps` side is not done);
+  a raw view covers at most 4 GiB of a buffer.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.

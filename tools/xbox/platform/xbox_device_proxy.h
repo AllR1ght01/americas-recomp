@@ -16,6 +16,7 @@ struct XboxObjectProxy {
     void* thunks;
     unsigned long long hits[160];  // how often each forwarded slot was called (overridden slots are not counted)
     const char* name;              // what this object is, for the trace
+    void* context;
     // XS_TRACE=1: the first call of every forwarded slot is logged to stderr with its argument registers and caller, so a game's use of the
     // Xbox-only vtable slots is discovered from one run (rdx/r8/r9 that look like pointers are pointer arguments, small values are flags or counts).
     static void __stdcall LogFirstHit(unsigned slot, unsigned long long* regs) {   // regs: r9, r8, rdx, rcx(this), slot, return address
