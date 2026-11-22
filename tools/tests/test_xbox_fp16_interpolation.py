@@ -30,7 +30,7 @@ class Fp16InterpolationTest(unittest.TestCase):
             env.pop("XBOX_ALLOW_UNMEASURED_F16_INTERP", None)
             return subprocess.run(
                 [DRIVER, "pixel.bin", "64", "pixel.spv", "empty.bind",
-                 "1", "ps", "2", "1", "1", mode],
+                 "1", "ps", "2", "1", "1", "0", mode],
                 cwd=work, env=env, text=True, capture_output=True, timeout=30,
             )
 

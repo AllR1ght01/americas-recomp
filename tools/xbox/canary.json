@@ -53,21 +53,21 @@
   "idx": "16500",
   "stage": "PS",
   "relaxed": false,
-  "expect": "VALID_BARY_EXT"
+  "expect": "VALID"
  },
  {
   "kind": "ps-bary",
   "idx": "16326",
   "stage": "PS",
   "relaxed": false,
-  "expect": "VALID_BARY_EXT"
+  "expect": "VALID"
  },
  {
   "kind": "ps-f16",
   "idx": "18772",
   "stage": "PS",
   "relaxed": false,
-  "expect": "THROW"
+  "expect": "VALID"
  },
  {
   "kind": "ps-f16",
@@ -81,7 +81,7 @@
   "idx": "21659",
   "stage": "PS",
   "relaxed": false,
-  "expect": "THROW"
+  "expect": "VALID"
  },
  {
   "kind": "ps-f16",

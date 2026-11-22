@@ -154,8 +154,8 @@ int main(int argc, char** argv) {
             request.graphics = g;
         }
     }
-    // For ps, argv[10] optionally supplies FLOAT_MODE in hex. Other stages keep their own argument layout.
-    const auto floatMode = stage == "ps" && argc > 10 ? std::stoul(argv[10], nullptr, 16) : 0xc0u;
+    // For ps, argv[11] optionally supplies FLOAT_MODE in hex (argv[10] is the flat interpolant mask). Other stages keep their own argument layout.
+    const auto floatMode = stage == "ps" && argc > 11 ? std::stoul(argv[11], nullptr, 16) : 0xc0u;
     if (floatMode > 0xffu) {
         std::fprintf(stderr, "pixel FLOAT_MODE must fit in one byte\n");
         return 2;
