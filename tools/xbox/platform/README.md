@@ -20,6 +20,9 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
 * `bvh_test.cpp` and `ffx_test.cpp` run the package's BVH builder and FidelityFX DLLs on a PC D3D12 device behind `xbox_device_proxy.h` (what works and where it stops: PLATFORM_SURFACE.md).
 * `bink_test.cpp` loads `Bink2Scarlett.dll` next to a stand-in `xmem.dll`, decodes every frame of a video and saves two frames as raw BGRA.
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).
+  `wine_smoke.sh <package dir> [work dir]` runs the same test on Linux under Wine: it builds `xmem.dll` and
+  `bink_test.exe` with mingw-w64, copies the package's DLLs, carves one video and fails if any frame errors. Needs
+  Wine, mingw-w64 and the user's package, so it is not part of the CI tests.
 
 * `xgr/idl_table.py <dir of IDLs> <table.json>` reads the interface definitions of another xgameruntime reimplementation (Xodus, LGPL-2.1; not part of this repo) and
   `xgr/gen_stub.py <table.json> <out_dir>` generates a logging stand-in `xgameruntime.dll` from it (60 interfaces, 1505 vtable slots). With `XGR_LOG=<file>` it records which
