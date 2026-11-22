@@ -50,6 +50,10 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
   it reports the intrinsics it could not replace). `dxil_sm66_wave.py` pins the wave size when a shader depends on 64 lanes.
 * Try: `bvh_test.exe` with `BVH_REPLACE_DIR=<dir of repl_NN.dxil>` for pipeline creation; `dispatch_test.exe shader.dxil [groups] [seed]` for a dispatch on GPU and WARP.
 * `lower_all.py <dir> <out>` runs the whole chain on a directory of disassembled shaders (all 53 builder shaders assemble; the wave size is pinned only where the result can depend on it, `xbox_dxil_lower.needs_wave64`). `oplower_check.py`, `wavelower_check.py` and `typedload_check.py` check lowered operations against software models.
+* `wave64_emulate.py <in.ll> <out.ll>` replaces 64-lane wave operations with group-shared memory and a group barrier, so a shader that would
+  be pinned to `[WaveSize(64)]` runs unpinned on a 32-lane device; `lower_all.py ... --emulate` tries it first. `wave64_emulate_kernel.ll`
+  with `wave64_emulate_check.py`, and `wave64_prefix_kernel.ll` with `wave64_prefix_check.py`, check it against software models
+  (64 groups x 64 lanes, GPU and WARP).
 * `dxasm --hash-only in.ll out.dxil` assembles without validating and writes only the container hash (`dxil_hash.h`), so a partly lowered shader that still calls `@xbox.*` intrinsics can be given to a PC driver.
 * `XS_TRACE=1` makes every proxy log the first call of each forwarded slot (argument registers, caller): one run shows which Xbox-only slots a program uses.
 * 64-bit addresses: `xbox_address_table.h` is the device side of the lowering's address table (recorded buffers, reserved heap descriptors, the heap

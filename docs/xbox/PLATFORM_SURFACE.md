@@ -105,6 +105,33 @@ one range crossing 4 GiB, two decoy entries in a 4096-entry table: 0 mismatches 
 In `bvh_test` (RTX 5090, `BVH_REPLACE_DIR`) the 31 lowered shaders are rejected at pipeline creation (`E_INVALIDARG`), as expected: the
 game's root signatures lack `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`.
 
+**64-lane waves on a 32-lane device (`wave64_emulate.py`)**: pinning `[WaveSize(64)]` is what #119 reports rejecting nine builder shaders
+at pipeline creation on NVIDIA, and what #47 reports rejecting a pinned kernel on WARP. `wave64_emulate.py` emulates the operations
+over the group's 64 threads instead of pinning: every lane writes its value to a group-shared slot, `dx.op.barrier` follows, and each lane
+reads the slots it needs. It uses `flattenedThreadIdInGroup` as the lane id, builds a ballot as a 64-bit OR of the per-slot bits, folds a
+reduction in slot order and reads a lane through a masked slot index. The result contains no wave operation, so it creates and runs unpinned
+on a 32-lane device. Covered: lane id, lane count, first lane, readlane first, readlane, ballot, active sum/product/min/max, active
+or/and/xor, prefix sum/product/min/max, any-true, all-true, all-equal and the quad operations (read inside the group of four), for i32, i64
+and f32 (all-equal and the boolean reductions take i32 or i1). `lower_all.py ... --emulate` tries it on every shader it would pin and falls
+back to pinning for a shader the emulation refuses or cannot finish. The declared shader-flags word has to follow the change (the wave flag goes, 64-bit use appears), which `lower_all.py` already
+repairs from the validator's message.
+Checked on the RTX 5070 (driver 621.01) and on WARP, 64 groups x 64 lanes: three synthetic kernels go through
+`lower_all.py ... --emulate`, assemble, sign, create as pipelines and run, and match their software models with 0 mismatches, with the GPU
+and WARP outputs identical. `wavelower_kernel.ll` covers lane id, three swizzles, readlane 31, ballot, mbcnt, bcnt1, two `v_cndmask` and
+readfirstlane (`wavelower_check.py`); `wave64_emulate_kernel.ll` covers active sum/product/min/max and or/and/xor on i32, f32 sum,
+readfirstlane f32, readlane f32 at a computed index, readfirstlane i64 and three quad reads (`wave64_emulate_check.py`, 16 values per lane);
+`wave64_prefix_kernel.ll` covers lane count, first lane, prefix sum/product/min/max on i32, prefix sum f32 and any-true/all-true/all-equal
+(`wave64_prefix_check.py`). The quad diagonal case is what shows the models check the formulas and not only the plumbing: the first version of
+the emulation used `lane ^ 4` for it and the model caught it on every lane. The same
+three kernels with the wave size pinned still fail pipeline creation with `0x80070057` on both adapters, so the emulation is what makes them
+run. The kernels exercise i32 active operations, f32 sum and i64 readlane first; active operations on i64 and on f32 other than sum are
+handled by the pass but not exercised by them.
+Limits: a group barrier must be reached by every thread, so the emulation is only valid where the wave operations run in uniform control
+flow; the pass refuses a shader whose emulated call is not in the entry block, and whether the nine builder shaders are in that shape is not
+established (they are not in this repository, so they were not run through it). f32 min/max ignore NaN (`fcmp` + `select`) and f32 sum and
+product fold in slot order, so they are not bit-identical to a tree reduction. An operation the pass does not cover is left in place and
+reported, which makes it refuse the shader rather than emit a mixture.
+
 **The proxy side of the address table (`xbox_address_table.h`, used by `xbox_overrides::WrapDevice`)**:
 - Recording: device slots 27 (`CreateCommittedResource`), 29 (`CreatePlacedResource`) and 76 (the Xbox resource creation) record every buffer
   that has `ALLOW_UNORDERED_ACCESS` at its `GetGPUVirtualAddress()` and width, and give it a raw UAV descriptor. Buffers in a default heap get
