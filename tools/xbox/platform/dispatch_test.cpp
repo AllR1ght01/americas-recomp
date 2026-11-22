@@ -30,8 +30,20 @@ static std::vector<uint8_t> Run(bool warp, const std::vector<char>& dxil, UINT g
     D3D12_ROOT_PARAMETER rp[2] = {};
     rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;  rp[0].Descriptor = {0, 0};
     rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; rp[1].DescriptorTable = {1, &range};
-    D3D12_ROOT_SIGNATURE_DESC rs = {2, rp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
-    ComPtr<ID3DBlob> sb, eb; D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sb, &eb);
+    const char* tablePath = getenv("DT_TABLE");
+    D3D12_ROOT_SIGNATURE_DESC rs = {2, rp, 0, nullptr, tablePath ? D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED : D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ComPtr<ID3DBlob> sb, eb;
+    if (tablePath) {
+        D3D12_DESCRIPTOR_RANGE1 range1 = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0};
+        D3D12_ROOT_PARAMETER1 rp1[2] = {};
+        rp1[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; rp1[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+        rp1[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; rp1[1].DescriptorTable = {1, &range1};
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC vrs = {}; vrs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        vrs.Desc_1_1 = {2, rp1, 0, nullptr, rs.Flags};
+        D3D12SerializeVersionedRootSignature(&vrs, &sb, &eb);
+    } else {
+        D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sb, &eb);
+    }
     ComPtr<ID3D12RootSignature> sig; dev->CreateRootSignature(0, sb->GetBufferPointer(), sb->GetBufferSize(), IID_PPV_ARGS(&sig));
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = sig.Get(); pd.CS = {dxil.data(), dxil.size()};
     ComPtr<ID3D12PipelineState> pso;
@@ -55,7 +67,15 @@ static std::vector<uint8_t> Run(bool warp, const std::vector<char>& dxil, UINT g
       up->Unmap(0, nullptr); }
     { uint32_t* c; cb->Map(0, nullptr, (void**)&c); c[0] = 0; c[1] = 0; c[2] = 0; c[3] = 0; cb->Unmap(0, nullptr); }
 
-    D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
+    std::vector<char> table;
+    if (tablePath) { std::ifstream tf(tablePath, std::ios::binary); table.assign(std::istreambuf_iterator<char>(tf), {}); table.resize((table.size() + 255) & ~size_t(255)); }
+    ComPtr<ID3D12Resource> tb, tup;
+    if (tablePath) {
+        tb = mk((UINT)table.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        tup = mk((UINT)table.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+        void* p; tup->Map(0, nullptr, &p); memcpy(p, table.data(), table.size()); tup->Unmap(0, nullptr);
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, tablePath ? 3u : 2u, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
     ComPtr<ID3D12DescriptorHeap> heap; dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap));
     UINT inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     for (int i = 0; i < 2; i++) {
@@ -64,9 +84,21 @@ static std::vector<uint8_t> Run(bool warp, const std::vector<char>& dxil, UINT g
         D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += (SIZE_T)i * inc;
         dev->CreateUnorderedAccessView(i ? u1.Get() : u0.Get(), nullptr, &uv, h);
     }
+    if (tablePath) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uv = {}; uv.Format = DXGI_FORMAT_R32_TYPELESS; uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uv.Buffer.NumElements = (UINT)table.size() / 4; uv.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += 2 * (SIZE_T)inc;
+        dev->CreateUnorderedAccessView(tb.Get(), nullptr, &uv, h);
+    }
     ComPtr<ID3D12CommandAllocator> al; dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&al));
     ComPtr<ID3D12GraphicsCommandList> cl; dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, al.Get(), nullptr, IID_PPV_ARGS(&cl));
     cl->CopyResource(u0.Get(), up.Get());
+    if (tablePath) {
+        cl->CopyResource(tb.Get(), tup.Get());
+        D3D12_RESOURCE_BARRIER tbb = {}; tbb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; tbb.Transition.pResource = tb.Get();
+        tbb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; tbb.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; tbb.Transition.Subresource = 0xffffffff;
+        cl->ResourceBarrier(1, &tbb);
+    }
     D3D12_RESOURCE_BARRIER b[2] = {};
     for (int i = 0; i < 2; i++) { b[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b[i].Transition.pResource = i ? u1.Get() : u0.Get(); b[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; b[i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b[i].Transition.Subresource = 0xffffffff; }
     cl->ResourceBarrier(2, b);

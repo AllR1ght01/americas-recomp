@@ -7,7 +7,7 @@ The Xbox validator also accepts first-class aggregates such as `{ half, half }` 
 so every such pair value is split into two scalars (its insertvalue/extractvalue chains disappear).
 Numeric type IDs (`%N = type ...`) are not supported; the input is expected to use named type tokens as `dxc -dumpbin` does.
 
-usage: python -I xbox_dxil_lower.py in.ll out.ll        then: dxasm out.ll out.dxil
+usage: python -I xbox_dxil_lower.py in.ll out.ll [address table heap index, default 0]        then: dxasm out.ll out.dxil
 
 Lowered so far (more are added as shaders need them):
   Med3_F32                 max(min(a,b), min(max(a,b),c))                              dx.op.binary.f32
@@ -25,11 +25,24 @@ Lowered so far (more are added as shaders need them):
   Min3/Max3_F32, Min3/Max3/Med3_U32, BFI, V_ALIGNBYTE_B32, WaveMin_U32, MakeUniform.i64   the obvious standard operations
   TypedLoad.i32            (handle, byte offset, format 65 = 8_UINT): the dword at (offset & ~3) of the raw buffer, byte (offset & 3);
                            only component 0 of the result may be used
+  global_load_dword{,x2,x3,x4}_with_cache, s_load_dword_with_cache, global_store_dword{,x3,x4}_with_cache,
+  global_atomic_{add,sub,fmin,fmax}
+                           64-bit address -> (resource, offset) through an address table read with ResourceDescriptorHeap[table]
+                           (the optional third argument, default 0): a 16-byte header, then 2^ADDRESS_TABLE_LOG2 entries of
+                           (base low, base high, size, heap index) sorted by base, unused ones with base 0xFFFFFFFFFFFFFFFF. An unrolled
+                           binary search picks the last entry whose base is <= the address; the access goes to
+                           ResourceDescriptorHeap[heap index] (a raw UAV) at address - base. fmin/fmax are two integer atomics
+                           (signed min/max for a non-negative value, unsigned max/min for a negative one, the other one neutral);
+                           their result is the first atomic's. Sets the ResourceDescriptorHeapIndexing shader flag.
+  llvm.copysign.f32        bit operations (the Xbox compiler leaves it; it is not a DXIL operation)
+Aggregates of up to four i32 (the x2/x3/x4 load results and store operands) are split into scalars like the pairs.
 The wave intrinsics assume the 64-lane waves the shaders were built for: run the result with the wave size pinned to 64 (dxil_sm66_wave.py).
 """
 import re, sys
 
-PAIR_RE = r"\{ (?:half, half|i32, i32) \}"
+PAIR_RE = r"\{ (?:half, half|i32, i32|i32, i32, i32|i32, i32, i32, i32) \}"
+ADDRESS_TABLE = 0
+ADDRESS_TABLE_LOG2 = 12
 
 
 def split_params(text):
@@ -154,6 +167,10 @@ DECLS = {
     "@dx.op.waveActiveOp.i32(": "declare i32 @dx.op.waveActiveOp.i32(i32, i32, i8, i8) #1",
     "@dx.op.waveReadLaneFirst.i64(": "declare i64 @dx.op.waveReadLaneFirst.i64(i32, i64) #1",
     "@dx.op.rawBufferLoad.i32(": "declare %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32, %dx.types.Handle, i32, i32, i8, i32) #1",
+    "@dx.op.rawBufferStore.i32(": "declare void @dx.op.rawBufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8, i32)",
+    "@dx.op.atomicBinOp.i32(": "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)",
+    "@dx.op.createHandleFromHeap(": "declare %dx.types.Handle @dx.op.createHandleFromHeap(i32, i32, i1, i1)",
+    "@dx.op.annotateHandle(": "declare %dx.types.Handle @dx.op.annotateHandle(i32, %dx.types.Handle, %dx.types.ResourceProperties)",
 }
 
 
@@ -184,8 +201,10 @@ def lower(text):
             return line
         return re.sub(r"%[\w.]+", lambda m: alias.get(m.group(0), m.group(0)), line)
 
-    ins_re = re.compile(r"^\s*(%[\w.]+) = insertvalue " + PAIR_RE + r" (undef|%[\w.]+), (?:half|i32) (%[\w.]+|[-+\w.]+), ([01])\s*$")
-    ext_re = re.compile(r"^\s*(%[\w.]+) = extractvalue " + PAIR_RE + r" (%[\w.]+), ([01])\s*$")
+    ins_re = re.compile(r"^\s*(%[\w.]+) = insertvalue (" + PAIR_RE + r") (undef|%[\w.]+|\{[^}]*\}), (?:half|i32) (%[\w.]+|[-+\w.]+), ([0-3])\s*$")
+    ext_re = re.compile(r"^\s*(%[\w.]+) = extractvalue " + PAIR_RE + r" (%[\w.]+), ([0-3])\s*$")
+    copysign_re = re.compile(r"^(\s*)(%[\w.]+) = (?:tail )?call float @llvm\.copysign\.f32\(float ([^,]+), float ([^)]+)\)\s*(?:,\s*![^;]*)?(?:;.*)?$")
+    store_re = re.compile(r"^(\s*)call void @xbox\.(global_store_dword(?:x[34])?_with_cache)\(i32 \d+, (.*?)\)\s*(?:,\s*![^;]*)?(?:;.*)?$")
     resret_re = re.compile(r"^(\s*)(%[\w.]+) = extractvalue %dx\.types\.ResRet\.i32 (%[\w.]+), (\d+)\s*$")
     call_re = re.compile(r"^(\s*)(%[\w.]+) = call ([^@]+?) @xbox\.([\w.]+)\(i32 \d+(?:, (.*?))?\)\s*(?:,\s*![^;]*)?(?:;.*)?$")
 
@@ -200,12 +219,58 @@ def lower(text):
             return pairs[v]
         return a.split(" ", 1)[1]
 
+    def heap(emit, index, nonuniform):
+        r, a = fresh(), fresh()
+        emit("%s = call %%dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %s, i1 false, i1 %s)" % (r, index, "true" if nonuniform else "false"))
+        emit("%s = call %%dx.types.Handle @dx.op.annotateHandle(i32 216, %%dx.types.Handle %s, %%dx.types.ResourceProperties { i32 4107, i32 0 })" % (a, r))
+        used.update(("@dx.op.createHandleFromHeap(", "@dx.op.annotateHandle(", "@dx.op.rawBufferLoad.i32("))
+        return a
+
+    def address(emit, addr, nonuniform):
+        def i(op, a, b):
+            r = fresh()
+            emit("%s = %s i32 %s, %s" % (r, op, a, b))
+            return r
+        table = heap(emit, ADDRESS_TABLE, False)
+
+        def entry(index, mask):
+            r = fresh()
+            emit("%s = call %%dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 %d, i32 4)"
+                 % (r, table, i("add", i("shl", index, 4), 16), mask))
+            comps = []
+            for k in range(4 if mask == 15 else 2):
+                c = fresh()
+                emit("%s = extractvalue %%dx.types.ResRet.i32 %s, %d" % (c, r, k))
+                comps.append(c)
+            lo, hi, w, base = fresh(), fresh(), fresh(), fresh()
+            emit("%s = zext i32 %s to i64" % (lo, comps[0]))
+            emit("%s = zext i32 %s to i64" % (hi, comps[1]))
+            emit("%s = shl i64 %s, 32" % (w, hi))
+            emit("%s = or i64 %s, %s" % (base, w, lo))
+            return base, comps
+        cur = "0"
+        for step in (1 << k for k in range(ADDRESS_TABLE_LOG2 - 1, -1, -1)):
+            probe = i("add", cur, step)
+            base, _ = entry(probe, 3)
+            le, nxt = fresh(), fresh()
+            emit("%s = icmp ule i64 %s, %s" % (le, base, addr))
+            emit("%s = select i1 %s, i32 %s, i32 %s" % (nxt, le, probe, cur))
+            cur = nxt
+        base, comps = entry(cur, 15)
+        rel, off = fresh(), fresh()
+        emit("%s = sub i64 %s, %s" % (rel, addr, base))
+        emit("%s = trunc i64 %s to i32" % (off, rel))
+        return heap(emit, comps[3], nonuniform), off
+
     for line in text.split("\n"):
         line = sub(line)
         m = ins_re.match(line)
         if m:
-            dst, src, val, idx = m.groups()
-            cur = list(pairs.get(src, ("undef", "undef")))
+            dst, ty, src, val, idx = m.groups()
+            if src.startswith("{"):
+                cur = re.findall(r"(?:half|i32) ([^,}\s]+)", src)
+            else:
+                cur = list(pairs.get(src, ("undef",) * (ty.count(",") + 1)))
             cur[int(idx)] = val
             pairs[dst] = tuple(cur)
             continue
@@ -218,6 +283,32 @@ def lower(text):
             if m.group(4) != "0":
                 raise SystemExit("TypedLoad.i32 result component %s is used; only component 0 is lowered" % m.group(4))
             out.append("%s%s = and i32 %s, 255" % (m.group(1), m.group(2), bytes_[m.group(3)]))
+            continue
+        m = copysign_re.match(line)
+        if m:
+            ind, dst, a, b = m.groups()
+            ba, bb, ma, mb = fresh(), fresh(), fresh(), fresh()
+            out.append("%s%s = bitcast float %s to i32" % (ind, ba, a))
+            out.append("%s%s = bitcast float %s to i32" % (ind, bb, b))
+            out.append("%s%s = and i32 %s, 2147483647" % (ind, ma, ba))
+            out.append("%s%s = and i32 %s, -2147483648" % (ind, mb, bb))
+            r = fresh()
+            out.append("%s%s = or i32 %s, %s" % (ind, r, ma, mb))
+            out.append("%s%s = bitcast i32 %s to float" % (ind, dst, r))
+            n_lowered += 1
+            continue
+        m = store_re.match(line)
+        if m:
+            ind, name, argtext = m.groups()
+            args = split_args(argtext)
+            emit = lambda s: out.append(ind + s)
+            h, off = address(emit, operand(args[0]), True)
+            vals = operand(args[1])
+            vals = (vals,) if isinstance(vals, str) else vals
+            emit("call void @dx.op.rawBufferStore.i32(i32 140, %%dx.types.Handle %s, i32 %s, i32 undef, %s, i8 %d, i32 4)"
+                 % (h, off, ", ".join("i32 " + v for v in (list(vals) + ["undef"] * 4)[:4]), (1 << len(vals)) - 1))
+            used.add("@dx.op.rawBufferStore.i32(")
+            n_lowered += 1
             continue
         m = call_re.match(line)
         if not m:
@@ -250,6 +341,54 @@ def lower(text):
             emit("%s = %s i32 %s, %s" % (r, op, a, b))
             return r
 
+        load = re.fullmatch(r"(?:global_load_dword(x[234])?|s_load_dword)_with_cache", name)
+        if load:
+            n = int(load.group(1)[1]) if load.group(1) else 1
+            h, off = address(emit, operand(args[0]), not name.startswith("s_"))
+            r = fresh()
+            emit("%s = call %%dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 %d, i32 4)"
+                 % (r, h, off, (1 << n) - 1))
+            used.add("@dx.op.rawBufferLoad.i32(")
+            if n == 1:
+                emit("%s = extractvalue %%dx.types.ResRet.i32 %s, 0" % (dst, r))
+            else:
+                comps = tuple(fresh() for _ in range(n))
+                for k, c in enumerate(comps):
+                    emit("%s = extractvalue %%dx.types.ResRet.i32 %s, %d" % (c, r, k))
+                pairs[dst] = comps
+            n_lowered += 1
+            continue
+        if name in ("global_atomic_add", "global_atomic_sub", "global_atomic_fmin", "global_atomic_fmax"):
+            h, off = address(emit, operand(args[0]), True)
+            v = operand(args[1])
+            used.add("@dx.op.atomicBinOp.i32(")
+
+            def atomic(op, value, d=None):
+                r = d or fresh()
+                emit("%s = call i32 @dx.op.atomicBinOp.i32(i32 78, %%dx.types.Handle %s, i32 %d, i32 %s, i32 undef, i32 undef, i32 %s)" % (r, h, op, off, value))
+                return r
+            if name == "global_atomic_add":
+                atomic(0, v, dst)
+            elif name == "global_atomic_sub":
+                atomic(0, i("sub", 0, v), dst)
+            else:
+                bits, neg = fresh(), fresh()
+                emit("%s = bitcast float %s to i32" % (bits, v))
+                emit("%s = icmp slt i32 %s, 0" % (neg, bits))
+                lo, hi = fresh(), fresh()
+                if name == "global_atomic_fmin":
+                    emit("%s = select i1 %s, i32 2147483647, i32 %s" % (lo, neg, bits))
+                    emit("%s = select i1 %s, i32 %s, i32 0" % (hi, neg, bits))
+                    first = atomic(4, lo)
+                    atomic(7, hi)
+                else:
+                    emit("%s = select i1 %s, i32 -2147483648, i32 %s" % (lo, neg, bits))
+                    emit("%s = select i1 %s, i32 %s, i32 -1" % (hi, neg, bits))
+                    first = atomic(5, lo)
+                    atomic(6, hi)
+                emit("%s = bitcast i32 %s to float" % (dst, first))
+            n_lowered += 1
+            continue
         if name == "Med3_F32":
             a, b, c = [operand(x) for x in args]
             lo, hi = bin_("f32", "float", a, b, 36), bin_("f32", "float", a, b, 35)
@@ -383,8 +522,8 @@ def lower(text):
     res = re.sub(r'target triple = "dxil-ms-xb\d*"', 'target triple = "dxil-ms-dx"', res)
     res = re.sub(r"!xbox\.compiler\.options = [^\n]*\n", "", res)
     # drop declarations of intrinsics that are gone; add the standard ones that are now used
-    still = set(re.findall(r"call [^@\n]*@(xbox\.[\w.]+)\(", res))
-    for nm in set(re.findall(r"^declare [^@\n]*@(xbox\.[\w.]+)\(", res, re.M)):
+    still = set(re.findall(r"call [^@\n]*@(xbox\.[\w.]+|llvm\.copysign\.f32)\(", res))
+    for nm in set(re.findall(r"^declare [^@\n]*@(xbox\.[\w.]+|llvm\.copysign\.f32)\(", res, re.M)):
         if nm not in still:
             res = re.sub(r"(; Function Attrs:[^\n]*\n)?declare [^\n]*@" + re.escape(nm) + r"\([^\n]*\n\n?", "", res)
     add = [DECLS[k] for k in sorted(used) if not re.search(r"^declare [^\n]*" + re.escape(k), res, re.M)]
@@ -392,6 +531,12 @@ def lower(text):
         res = insert_decls(res, add)
     if "%dx.types.fouri32" in res and "%dx.types.fouri32 = type" not in res:
         res = res.replace("%dx.types.Handle = type { i8* }\n", "%dx.types.Handle = type { i8* }\n%dx.types.fouri32 = type { i32, i32, i32, i32 }\n", 1)
+    if "@dx.op.createHandleFromHeap(" in used:
+        res = re.sub(r"^(!\d+ = !\{i32 0, i64 )(\d+)", lambda m: m.group(1) + str(int(m.group(2)) | 1 << 30), res, count=1, flags=re.M)
+    if "%dx.types.ResRet.i32" in res and "%dx.types.ResRet.i32 = type" not in res:
+        res = res.replace("%dx.types.Handle = type { i8* }\n", "%dx.types.Handle = type { i8* }\n%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }\n", 1)
+    if "%dx.types.ResourceProperties" in res and "%dx.types.ResourceProperties = type" not in res:
+        res = res.replace("%dx.types.Handle = type { i8* }\n", "%dx.types.Handle = type { i8* }\n%dx.types.ResourceProperties = type { i32, i32 }\n", 1)
     res = renumber(res)
     left = set(re.findall(r"call [^@\n]*@(xbox\.[\w.]+)\(", res))
     return res, n_lowered, left
@@ -399,6 +544,8 @@ def lower(text):
 
 if __name__ == "__main__":
     text = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+    if len(sys.argv) > 3:
+        ADDRESS_TABLE = int(sys.argv[3])
     res, n, left = lower(text)
     open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(res)
     print("lowered %d call(s); intrinsics still called: %s" % (n, sorted(left) or "none"))

@@ -97,6 +97,14 @@ they are 64-bit fields read from buffers (for example `rawBufferLoad.i64` at off
 Design for them: the proxy records every resource's (virtual address, size, descriptor) when it is created, the lowered shader looks the address up in that table
 (range search in a constant table) and loads through `ResourceDescriptorHeap[i]` (SM 6.6) at `address - base`. It needs the real addresses, so it waits for the game or a captured input;
 raw buffers are limited to 4 GiB per view.
+The shader side is done (`xbox_dxil_lower.py`, table format in its docstring): with it `lower_all.py` assembles and signs all 53 builder shaders
+(22 before; those 22 are byte-identical). `address_kernel.ll` + `address_check.py` exercise every lowered form (1-4 dword loads, `s_load`,
+1/3/4 dword stores, `add`/`sub`/`fmin`/`fmax` atomics) through `dispatch_test`'s heap mode (`DT_TABLE=<table file>`) at made-up addresses,
+one range crossing 4 GiB, two decoy entries in a 4096-entry table: 0 mismatches over 1024 and 16384 threads and three seeds on the RTX 5090
+(driver 617.42) and on WARP. WARP rejects a pinned `WaveSize(32)` (`E_INVALIDARG`), so that kernel runs unpinned (`dxil_sm66_wave.py ... 0`).
+In `bvh_test` (RTX 5090, `BVH_REPLACE_DIR`) the 31 lowered shaders are rejected at pipeline creation (`E_INVALIDARG`), as expected: the
+game's root signatures lack `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`. Still to do (BVH-1 part 2): the proxy records each resource's address
+and size, keeps the table in a heap slot of its own, and adds that flag to the game's root signatures.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.
