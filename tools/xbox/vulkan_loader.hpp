@@ -41,8 +41,18 @@ inline void LoadVulkanLoader() {
     if (library == nullptr) throw std::runtime_error("cannot load vulkan-1.dll");
     vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(reinterpret_cast<void*>(GetProcAddress(library, "vkGetInstanceProcAddr")));
 #else
+#ifdef __APPLE__
+    void* library = dlopen("@rpath/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr)
+        library = dlopen("@rpath/libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr)
+        library = dlopen("/opt/homebrew/lib/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr)
+        library = dlopen("/usr/local/lib/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+#else
     void* library = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
     if (library == nullptr) library = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+#endif
     if (library == nullptr) throw std::runtime_error(std::string("cannot load the Vulkan loader: ") + dlerror());
     vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(library, "vkGetInstanceProcAddr"));
 #endif
