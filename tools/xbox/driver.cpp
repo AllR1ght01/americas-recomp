@@ -116,7 +116,8 @@ int main(int argc, char** argv) {
         for (std::uint32_t i = 0; i < 8; i++) { px.targetExportMapping[i] = static_cast<std::uint8_t>(i); px.targetOutputMode[i] = 4; px.targetExportPacking[i] = ColorExportPacking::None; }
         // argv[9]: hex mask of attributes the code reads with 16-bit interpolation (FP16_INTERP_MODE = bit 19 of the setting).
         const std::uint32_t fp16Mask = argc > 9 ? std::stoul(argv[9], nullptr, 16) : 0u;
-        for (std::uint32_t i = 0; i < px.interpolatorCount && i < 32; i++) px.interpolatorSettings[i] = i | (((fp16Mask >> i) & 1u) ? 0x80000u : 0u);
+        const std::uint32_t flatMask = argc > 10 ? std::stoul(argv[10], nullptr, 16) : 0u;
+        for (std::uint32_t i = 0; i < px.interpolatorCount && i < 32; i++) px.interpolatorSettings[i] = i | (((fp16Mask >> i) & 1u) ? 0x80000u : 0u) | (((flatMask >> i) & 1u) ? 0x400u : 0u);
         request.context.pixel = px;
     } else if (stage == "vs" || stage == "ms" || stage == "gs") {
         ShaderVertexStageInfo vx{};

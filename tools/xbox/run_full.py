@@ -9,7 +9,7 @@ recorded in run_full_costs.json, so long compiles overlap with the short ones.
 
 Same drivers and defaults as run_corpus_bind.py (compute, driver_heap.exe, fake-memory variants default/0/2/3 until one validates) and
 run_graphics_final.py (PS/VS/MS, driver_gfx2.exe (XBOX_DRIVER_GFX overrides), PS both strict and with XBOX_ALLOW_UNMEASURED_F16_INTERP, barycentric extension
-retry). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
+retry; PS interpolants read only at P0 are passed as flat, as the FSSM input table declares them). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
 killed run can be resumed by passing its own output as --skip. Stage '?' in the manifest is mesh (type 6/7), GS has no driver mode and
 is recorded as SKIP."""
 import subprocess, csv, sys, collections, concurrent.futures as cf, json, os, time
@@ -26,18 +26,28 @@ BINDS = M + "binds_full/"        # canary.py --binds-dir points this elsewhere f
 GFX = {"PS": "ps", "VS": "vs", "?": "ms", "GS": "gs"}
 
 
-def attrs(idx):
+def interpolants(idx):
+    """(interpolant count, fp16 mask, flat mask) of a pixel shader, from its code. Flat = read only with v_interp_mov_f32 P0 (VINTRP
+    OP 2, VSRC 2): those are exactly the interpolants whose FSSM input table entry has flags bit 0 (FLAT_SHADE), see fssm_header.py."""
     d = open(M + f"bins_full/{idx}.bin", "rb").read()
     ins, _ = rdna2.sweep(d, 0, len(d))
-    a, f = [], []
+    a, f, p0, other = [], [], set(), set()
     for i in ins:
         if i.fmt.startswith("VINTRP"):
-            a.append((i.words[0] >> 10) & 0x3F)
+            w = i.words[0]
+            x = (w >> 10) & 0x3F
+            a.append(x)
+            (p0 if ((w >> 16) & 3) == 2 and (w & 0xFF) == 2 else other).add(x)
         elif i.name in ("v_interp_p1ll_f16", "v_interp_p1lv_f16", "v_interp_p2_f16"):
             x = i.words[1] & 0x3F
             a.append(x)
             f.append(x)
-    return (max(a) + 1 if a else 0, sum(1 << x for x in set(f)))
+            other.add(x)
+    return (max(a) + 1 if a else 0, sum(1 << x for x in set(f)), sum(1 << x for x in p0 - other))
+
+
+def attrs(idx):
+    return interpolants(idx)[:2]
 
 
 def classify(cmd, spv, env):
@@ -81,8 +91,8 @@ def graphics(idx, st, relaxed):
             e["XBOX_FRAGMENT_BARY"] = "1"
         cmd = [DRIVER_GFX, M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
         if st == "ps":
-            n, mask = attrs(idx)
-            cmd += ["2", str(n), "%x" % mask]
+            n, mask, flat = interpolants(idx)
+            cmd += ["2", str(n), "%x" % mask, "%x" % flat]
         r = classify(cmd, spv, e)
         if os.path.exists(spv):
             os.remove(spv)
@@ -114,7 +124,7 @@ def _logic_hash():
     global _LOGIC
     if _LOGIC is None:
         import hashlib, inspect
-        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (attrs, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
+        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (interpolants, attrs, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
     return _LOGIC
 
 
