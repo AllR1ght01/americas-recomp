@@ -408,3 +408,11 @@ spirv_to_dxil has no mesh stage): **151 convert to validator-clean DXIL (69%)**.
 validation with overlapping resource bindings. Every one of the 58 crashes declares RuntimeDescriptorArray + SampledImageArrayDynamicIndexing
 (0 of 151 passing shaders do): bindless image arrays are the blocker, not raw pointers (shaders with raw pointers: 15 of 40 convert).
 Sample numbers, not corpus numbers. Per-shader outcomes: docs/xbox/dxil_probe.json.
+
+## Image atomics over descriptor Phis
+Reads and stores were split over descriptor Phis; image atomics were not, so an atomic through a Phi-selected T# always failed with
+"GetImageResource dword 0 is not a valid runtime value". 32-bit atomics are now split like stores (`SplittableImageRead`,
+`ReplaceWithArmCopies` in `ResourceTracker.cpp`): each arm's copy runs with EXEC narrowed to that arm's lanes, so a lane performs its
+atomic once, and the returned pre-op value is selected from the lane's arm. `XBOX_NO_ATOMIC_SPLIT=1` turns it off. 64-bit atomics are
+not split. Result at 6a9417f8a6 (Mac, `run_full.py` classification): compute 24774 and pixel 19845, 21239, 21396, 21416, 21436, 21450,
+21464 THROW -> VALID, no other shader changes. `spirv-val` only, not executed.

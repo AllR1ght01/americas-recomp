@@ -1725,8 +1725,17 @@ private:
             case IrOpcode::ImageRead: return inst.Type() == IrType::U32x4;
             // XBOX-FORK: stores are split too; each arm's copy runs only for the lanes of its arm (EXEC is narrowed per arm).
             case IrOpcode::ImageWrite: return std::getenv("XBOX_NO_STORE_SPLIT") == nullptr && inst.Type() == IrType::Void && inst.ArgumentCount() == 4u && inst.Argument(3u)->Type() == IrType::Bool;
-            default: return false;
+            default: return SplittableImageAtomic(inst);
         }
+    }
+
+    static bool SplittableImageAtomic(const IrValue& inst) {
+        return std::getenv("XBOX_NO_ATOMIC_SPLIT") == nullptr && ImageOpcodeInfoOf(inst.Opcode()).access == ImageAccess::Atomic && inst.Type() == IrType::U32 &&
+            inst.ArgumentCount() >= 4u && inst.Argument(inst.ArgumentCount() - 1u)->Type() == IrType::Bool;
+    }
+
+    static bool NarrowsArmExec(const IrValue& inst) {
+        return inst.Type() == IrType::Void || SplittableImageAtomic(inst);
     }
 
     void CollectDescriptorPhis(IrValue* value, std::vector<IrValue*>& phis, std::uint32_t depth) const {
@@ -2077,7 +2086,7 @@ private:
                 }
                 arguments[slot] = EmitCopy(*handles[slot], dwords, inst);
             }
-            if (inst.Type() == IrType::Void) {
+            if (NarrowsArmExec(inst)) {
                 IrValue* active = inst.Argument(inst.ArgumentCount() - 1u);
                 for (std::uint32_t before = 0; before < arm && before < conditions.size(); ++before) {
                     const std::array<IrValue*, 1> negate {conditions[before]};
@@ -2118,7 +2127,12 @@ private:
             return;
         }
         IrValue* result = copies.back();
-        if (copies.size() > 1u) {
+        if (copies.size() > 1u && inst.Type() == IrType::U32) {
+            for (std::uint32_t arm = static_cast<std::uint32_t>(copies.size()) - 1u; arm-- > 0u;) {
+                const std::array<IrValue*, 3> arguments {conditions[arm], copies[arm], result};
+                result = EmitBefore(inst, IrOpcode::SelectU32, IrType::U32, arguments);
+            }
+        } else if (copies.size() > 1u) {
             std::array<IrValue*, 4> components {};
             for (std::uint32_t component = 0; component < components.size(); component++) {
                 const auto extract = [&](IrValue* vector) {
