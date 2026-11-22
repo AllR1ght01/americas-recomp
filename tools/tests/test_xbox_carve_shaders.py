@@ -157,6 +157,28 @@ class MainTest(unittest.TestCase):
         self.assertTrue(kept.exists())
         self.assertFalse((self.out / "manifest.csv").exists())
 
+    def test_existing_vertex_inputs_or_manifest_without_force_abort(self):
+        self.archive.write_bytes(b"\x00")
+        vins = self.out / "vin"
+        vins.mkdir()
+        for kept in (vins / "1.vin", self.out / "manifest.csv"):
+            with self.subTest(path=kept.name):
+                kept.write_bytes(b"previous run")
+                with self.assertRaises(SystemExit) as raised:
+                    self.run_main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(kept.read_bytes(), b"previous run")
+                kept.unlink()
+
+    def test_force_preserves_bins_when_vertex_output_directory_is_unusable(self):
+        self.archive.write_bytes(b"\x00")
+        (self.out / "vin").write_bytes(b"not a directory")
+        kept = self.bins / "1.bin"
+        kept.write_bytes(b"previous run")
+        with self.assertRaises(FileExistsError):
+            self.run_main("--force")
+        self.assertEqual(kept.read_bytes(), b"previous run")
+
     def test_force_preserves_outputs_when_archive_cannot_be_mapped(self):
         vins = self.out / "vin"
         vins.mkdir()
@@ -180,12 +202,22 @@ class MainTest(unittest.TestCase):
         untouched = ("keep.txt", "1.bin.bak", "x.bin")
         for name in managed + untouched:
             (self.bins / name).write_bytes(b"old")
+        vins = self.out / "vin"
+        vins.mkdir()
+        (vins / "1.vin").write_bytes(b"old")
+        (vins / "keep.vin").write_bytes(b"keep")
+        manifest_path = self.out / "manifest.csv"
+        manifest_path.write_bytes(b"old manifest")
+
         output = self.run_main("--force")
+
+        self.assertFalse((vins / "1.vin").exists())
+        self.assertEqual((vins / "keep.vin").read_bytes(), b"keep")
         for name in managed:
             self.assertFalse((self.bins / name).exists(), name)
         for name in untouched:
             self.assertTrue((self.bins / name).exists(), name)
-        manifest = (self.out / "manifest.csv").read_text().splitlines()
+        manifest = manifest_path.read_text().splitlines()
         self.assertEqual(manifest, [",".join(carve_shaders.FIELDS)])
         self.assertIn("names found: 0", output)
 
