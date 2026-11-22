@@ -153,6 +153,15 @@ with `s_wqm_b32`, and exports a constant; a second run activates two quads only,
 so the other quads must stay clear. Both run with `XBOX_NO_FRAGMENT_BARY=1`, the
 host perspective path; the quad operations do not need the barycentric
 extension.
+The two-quad case assumes the 32-lane pixel wave is one host subgroup. `exec`
+builds pixel shaders for the device's `subgroupSize` without requesting a size,
+and the driver may run the fragment stage narrower: Intel ANV runs it 16 wide
+(FRAGMENT is not in its `requiredSubgroupSizeStages`, so it cannot be pinned), so
+EXEC applies per 16 lanes and twice the quads light. The test first reads each
+lane's `v_mbcnt_lo_u32_b32` index and skips that case when the observed lane span
+(highest index plus one) is below 32. The probe is a separate shader, so this is
+a heuristic; a probe image that is not a contiguous run of lane indices counts as
+a failure and both cases still run.
 
 ## Windows quick start
 

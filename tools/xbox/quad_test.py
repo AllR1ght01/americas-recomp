@@ -6,6 +6,17 @@ The second narrows EXEC to one lane per quad, expands it with s_wqm_b32, and
 exports a constant; a second run activates two quads only, so the other quads
 must stay clear. Both run with XBOX_NO_FRAGMENT_BARY=1, the host perspective
 path; the quad operations are independent of the barycentric extension.
+
+The two-quad mask assumes the 32-lane pixel wave runs as one host subgroup.
+exec builds pixel shaders for the device's subgroupSize without requesting a
+size, and the driver may run the fragment stage narrower: Intel ANV runs it 16
+wide (and cannot pin it, FRAGMENT is not in its requiredSubgroupSizeStages), so
+EXEC applies per 16 lanes and twice the quads light. A third program exports
+each lane's v_mbcnt_lo_u32_b32 index; when the observed lane span (highest index
+plus one) is below 32, the two-quad case is skipped rather than failed. This is
+a heuristic: it reads the lanes that wrote pixels in the probe shader, which is
+compiled separately from the s_wqm shader. A probe image that does not look
+like lane indices counts as a failure, and both s_wqm cases still run.
 """
 import argparse
 import os
@@ -72,6 +83,24 @@ def quad_program():
 def wqm_program(active_mask):
     words = [move(2, 242), 0xBEFE03FF, active_mask, 0xBEFE097E, *export(0, [2, 2, 2, 2]), 0xBF810000]
     return struct.pack(f"<{len(words)}I", *words)
+
+
+def lane_program():
+    # v_mbcnt_lo_u32_b32 v2, -1, 0; v_cvt_f32_u32 v2, v2: each pixel exports its lane index.
+    words = [0xD7650002, 0x020100C1, 0x7E040D02, *export(0, [2, 2, 2, 2]), 0xBF810000]
+    return struct.pack(f"<{len(words)}I", *words)
+
+
+def lane_span(image):
+    lanes = set()
+    for value in image[0::4]:
+        if not 0.0 <= value < 64.0 or value != int(value):
+            raise SystemExit(f"exported {value!r}, not a lane index")
+        lanes.add(int(value))
+    span = max(lanes) + 1
+    if lanes != set(range(span)) or span < 4 or span & (span - 1):
+        raise SystemExit(f"lanes {sorted(lanes)[:8]} (of {len(lanes)}) are not a contiguous power-of-two span")
+    return span
 
 
 def compile_vertex(compiler, work, name, source):
@@ -148,8 +177,18 @@ def main():
         except SystemExit as error:
             failures += 1
             print("FAIL quad swizzle:", error)
+        try:
+            span = lane_span(run(runner, work, wqm_vertex, lane_program(), 0))
+        except SystemExit as error:
+            failures += 1
+            span = None
+            print("FAIL lane probe:", error)
         for mask, expected, label in ((0x11111111, 4096, "all quads"),
                                       (0x00000011, 1024, "two quads")):
+            if label == "two quads" and span is not None and span < 32:
+                print(f"SKIP s_wqm ({label}): the pixel shader ran with lane indices 0..{span - 1}, "
+                      f"so a 32-lane EXEC mask applies per {span} lanes")
+                continue
             try:
                 count = verify_wqm(run(runner, work, wqm_vertex, wqm_program(mask), 0), expected)
                 print(f"PASS s_wqm ({label}): {count} channels at 1.0, rest clear")
