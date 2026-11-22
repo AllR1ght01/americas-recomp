@@ -115,6 +115,9 @@ def main():
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write("### xgameruntime stand-in tests (MSVC, Windows)\n\n" + "\n".join(rows) + "\n")
+    if not results:
+        fail("run_tests", "no test_*.cpp found next to run_tests.py")
+    annotate("run_tests", "; ".join("%s %s" % (r[0], r[1]) for r in results), "notice")
     failed = [r[0] for r in results if r[1] != "pass"]
     if failed:
         sys.exit("failed: " + ", ".join(failed))
