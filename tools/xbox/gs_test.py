@@ -7,7 +7,9 @@ geometry shader's colour to an 8x8 RGBA32F target.
 
 The first program emits a full-screen triangle, so every pixel must be red. The
 second emits a left-half quad, so only the left four columns must be red; the
-rest must keep the clear value.
+rest must keep the clear value. The guest program ignores its inputs, so the
+same checks run with point, line, triangle, line-adjacency and
+triangle-adjacency host input primitives.
 """
 import argparse
 import os
@@ -26,7 +28,7 @@ out gl_PerVertex {
 };
 void main() {
     vec2 p[3] = vec2[](vec2(-1,-1), vec2(4,-1), vec2(-1,4));
-    gl_Position = vec4(p[gl_VertexIndex], 0, 1);
+    gl_Position = vec4(p[gl_VertexIndex % 3], 0, 1);
 }
 """
 FRAGMENT = """#version 450
@@ -111,13 +113,13 @@ def verify_half(data):
                 raise SystemExit(f"pixel ({x}, {y}): expected {expected}, read {got}")
 
 
-def run_case(runner, compiler, work, name, vertices, verify):
+def run_case(runner, compiler, work, name, vertices, verify, input_primitive=3):
     compile_shader(compiler, work, "vs", VERTEX, ".vert")
     compile_shader(compiler, work, "fs", FRAGMENT, ".frag")
     (work / "gs.bin").write_bytes(program(vertices))
     (work / "scenario.txt").write_text(
         f"stage gs\nwave 64\ntarget {WIDTH} {HEIGHT}\nvs vs.spv\nfs fs.spv\n"
-        f"geom 3 3 {len(vertices)} 8 8 1 1\ncode gs.bin\nexport 0 9 0xe4\nout out\n",
+        f"geom {input_primitive} 3 {len(vertices)} 8 8 1 1\ncode gs.bin\nexport 0 9 0xe4\nout out\n",
         encoding="ascii")
     subprocess.run([runner, "scenario.txt"], cwd=work, check=True, timeout=90)
     verify(read_target(work / "out" / "target0.bin"))
@@ -132,9 +134,13 @@ def main():
     if not runner.is_file() or compiler is None:
         parser.error("provide a built --exec runner and put glslangValidator on PATH")
     with tempfile.TemporaryDirectory(prefix="geometry ") as temp:
-        run_case(runner, compiler, Path(temp), "full", FULL, verify_full)
-        run_case(runner, compiler, Path(temp), "half", HALF, verify_half)
-    print(f"PASS: geometry shader filled {WIDTH * HEIGHT} pixels and clipped a half-screen quad")
+        for input_primitive in (1, 2, 3, 4, 5):
+            run_case(runner, compiler, Path(temp), f"full-{input_primitive}",
+                     FULL, verify_full, input_primitive)
+            run_case(runner, compiler, Path(temp), f"half-{input_primitive}",
+                     HALF, verify_half, input_primitive)
+    print(f"PASS: geometry shader filled {WIDTH * HEIGHT} pixels and clipped a half-screen quad "
+          f"with point, line, triangle and adjacency inputs")
 
 
 if __name__ == "__main__":
