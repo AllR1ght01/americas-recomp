@@ -7,7 +7,7 @@ The IDLs are read to make table.json (idl_table.py) and the stub source (gen_stu
 Each test runs in the output directory with table.json next to it; test_save also runs a second time with `reopen`.
 In GitHub Actions each FAIL line becomes an error annotation and a summary table is written to the job summary.
 """
-import argparse, glob, os, pathlib, subprocess, sys, time, traceback
+import argparse, glob, os, pathlib, shutil, subprocess, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
@@ -67,6 +67,9 @@ def main():
         env = vc_env()
     except Exception as e:
         fail("setup", "no MSVC environment: %s" % e)
+    cl = shutil.which("cl", path=env.get("Path") or env.get("PATH"))
+    if not cl:
+        fail("setup", "cl.exe is not on the MSVC environment's PATH")
 
     py = [sys.executable, "-I"]
     if run(py + [str(HERE / "idl_table.py"), idl_dir, str(out / "table.json")], None, out, "idl_table.py"):
@@ -75,7 +78,7 @@ def main():
         fail("gen_stub.py", "generating the stub failed")
 
     sources = [str(out / "gen" / "xgr_stub.cpp")] + sorted(glob.glob(str(RUNTIME / "*.cpp"))) + sorted(glob.glob(str(RUNTIME / "gtx" / "*.cpp")))
-    dll = ["cl", "/nologo", "/LD", "/O2", "/EHsc", "/std:c++20", "/DXGR_WITH_RUNTIME", "/I", str(RUNTIME), "/Fo:" + str(out) + "\\"] + sources
+    dll = [cl, "/nologo", "/LD", "/O2", "/EHsc", "/std:c++20", "/DXGR_WITH_RUNTIME", "/I", str(RUNTIME), "/Fo:" + str(out) + "\\"] + sources
     dll += ["/Fe:" + str(out / "xgameruntime.dll"), "/link", "/DEF:" + str(out / "gen" / "xgameruntime.def")] + DLL_LIBS
     if run(dll, env, out, "xgameruntime.dll"):
         fail("xgameruntime.dll", "building xgameruntime.dll failed")
@@ -88,7 +91,7 @@ def main():
         name = src.stem
         objdir = out / "obj" / name
         objdir.mkdir(parents=True, exist_ok=True)
-        cmd = ["cl", "/nologo", "/EHsc", "/std:c++20", "/Fo:" + str(objdir) + "\\", str(src), "/Fe:" + str(out / (name + ".exe")), "/link"] + TEST_LIBS
+        cmd = [cl, "/nologo", "/EHsc", "/std:c++20", "/Fo:" + str(objdir) + "\\", str(src), "/Fe:" + str(out / (name + ".exe")), "/link"] + TEST_LIBS
         if run(cmd, env, out, name):
             results.append((name, "build failed", 0, 0.0))
             continue
