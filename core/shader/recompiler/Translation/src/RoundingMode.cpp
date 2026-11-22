@@ -1,5 +1,6 @@
 #include "Translation/RoundingMode.hpp"
 #include "Translation/TranslationContext.hpp"
+#include <cstdlib>
 #include <deque>
 #include <stdexcept>
 #include <string>
@@ -110,8 +111,10 @@ RoundingUse RoundingUseOf(RdnaOpcode opcode) {
         return {round1664 | denorm1664, RoundingUseKind::Directed16};
     case RdnaOpcode::VInterpP1llF16:
     case RdnaOpcode::VInterpP1lvF16:
-    case RdnaOpcode::VInterpP2F16:
-        return {ModeTrackedBits, RoundingUseKind::SelfChecked};
+    case RdnaOpcode::VInterpP2F16: {
+        static const bool allowRounding = std::getenv("XBOX_ALLOW_UNMEASURED_F16_INTERP") != nullptr;
+        return {allowRounding ? ModeDenormBits : ModeTrackedBits, RoundingUseKind::SelfChecked};
+    }
     case RdnaOpcode::VMadMixloF16:
     case RdnaOpcode::VMadMixhiF16:
         return {ModeTrackedBits, RoundingUseKind::SelfChecked};
