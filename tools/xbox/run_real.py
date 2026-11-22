@@ -9,12 +9,16 @@ usage: run_real.py <out.json> [--max-bytes N] [--limit N] [--ids a,b,c] [--worke
 """
 import concurrent.futures as cf, csv, json, os, random, struct, subprocess, sys, tempfile, time
 
-ROOT = r"E:/Programming/rpf9shaders/out_disasm/anyps5/"
+ROOT = os.environ.get("XBOX_CORPUS_DIR", r"E:/Programming/rpf9shaders/out_disasm/anyps5/")
+BINS_DIR = os.environ.get("XBOX_BINS_DIR", os.path.join(ROOT, "bins_all"))
+BINDS_DIR = os.environ.get("XBOX_BINDS_DIR", os.path.join(ROOT, "binds_all"))
+MANIFEST = os.environ.get("XBOX_MANIFEST", os.path.join(ROOT, "manifest_all.csv"))
 EXEC = os.environ.get("XBOX_EXEC", r"E:/Programming/anyps5_src/build/exec.exe")
-USER_DWORDS = 10          # the wrapped compute shaders read the workgroup id from s10/s11
+USER_DWORDS = 10
 NODE_BYTES = 1 << 16
 DATA_BYTES = 1 << 20
 IMG = 64
+IMG3D = 16
 ARRAY_LAYERS = 4
 
 def _blob(profile="mixed"):
@@ -45,11 +49,11 @@ def parse_bind(path):
 
 def build(idx, wave, workdir, threads=None, profile="mixed"):
     """returns (scenario lines, info dict) or raises Unsupported"""
-    nodes, descs = parse_bind(ROOT + f"binds_all/{idx}.bind")
+    nodes, descs = parse_bind(os.path.join(BINDS_DIR, f"{idx}.bind"))
     rnd = random.Random(int(idx))
-    user_dwords = max([s[1] + 1 for s in nodes.values() if s[0] == "user"] or [0])   # workgroup ids follow the last user register
+    user_dwords = max([s[1] + 1 for s in nodes.values() if s[0] == "user"] or [0])
     threads = threads or workgroup_threads(idx, wave)
-    lines = [f"wave {wave}", "groups 2 2 1", f"threads {threads} 1 1", f"code {ROOT}bins_all/{idx}.bin", f"out {workdir}/out", f"userdwords {user_dwords}", "lds 4096", "lowguest"]
+    lines = [f"wave {wave}", "groups 2 2 1", f"threads {threads} 1 1", f"code {os.path.join(BINS_DIR, f'{idx}.bin')}", f"out {workdir}/out", f"userdwords {user_dwords}", "lds 4096", "lowguest"]
     info = {"data": [], "images": []}
     for nid in nodes:
         lines.append(f"region {100 + nid} {NODE_BYTES}")
@@ -75,19 +79,23 @@ def build(idx, wave, workdir, threads=None, profile="mixed"):
                       f"poke {base} {off + 8} {DATA_BYTES // 16}", f"poke {base} {off + 12} 0x1004dfac"]
             info["data"].append(data_id)
             data_id += 1
-        elif cls in ("img1", "img5"):
-            # every image gets its own seeded normal-float texels so that a wrong coordinate or a mixed-up image shows in the result;
-            # img5 (a 2D array) has ARRAY_LAYERS slices
-            layers = ARRAY_LAYERS if cls == "img5" else 1
+        elif cls in ("img0", "img1", "img2", "img5"):
             ip = os.path.join(workdir, f"img{image_id}.bin")
             irnd = random.Random(1000 + image_id)
-            open(ip, "wb").write(b"".join(struct.pack('<f', 0.25 + irnd.random() * 3.75) for _ in range(IMG * IMG * 4 * layers)))
-            lines += [f"image {image_id} {IMG} {IMG}" + (f" layers {layers}" if layers > 1 else "") + f" init {ip}", f"timg {base} {off} {image_id}"]
+            if cls == "img0":
+                open(ip, "wb").write(b"".join(struct.pack('<f', 0.25 + irnd.random() * 3.75) for _ in range(IMG * 4)))
+                lines += [f"image {image_id} {IMG} 1 dim 1d init {ip}", f"timg {base} {off} {image_id}"]
+            elif cls == "img2":
+                open(ip, "wb").write(b"".join(struct.pack('<f', 0.25 + irnd.random() * 3.75) for _ in range(IMG3D * IMG3D * IMG3D * 4)))
+                lines += [f"image {image_id} {IMG3D} {IMG3D} dim 3d depth {IMG3D} init {ip}", f"timg {base} {off} {image_id}"]
+            else:
+                layers = ARRAY_LAYERS if cls == "img5" else 1
+                open(ip, "wb").write(b"".join(struct.pack('<f', 0.25 + irnd.random() * 3.75) for _ in range(IMG * IMG * 4 * layers)))
+                lines += [f"image {image_id} {IMG} {IMG}" + (f" layers {layers}" if layers > 1 else "") + f" init {ip}", f"timg {base} {off} {image_id}"]
             info["images"].append(image_id)
             image_id += 1
         elif cls.startswith("img"):
             raise Unsupported("image class " + cls)
-        # samplers need no memory: the harness binds a default sampler
     return lines, info
 
 _RDNA = None
@@ -96,10 +104,17 @@ def workgroup_threads(idx, wave):
     Guess: two waves when the code uses LDS or a barrier, otherwise one wave."""
     global _RDNA
     if _RDNA is None:
-        sys.path.insert(0, ROOT + "../")
-        import rdna2
-        _RDNA = rdna2
-    d = open(ROOT + f"bins_all/{idx}.bin", "rb").read()
+        try:
+            if os.environ.get("XBOX_RDNA2") == "recomp":
+                raise ImportError
+            sys.path.insert(0, os.path.join(ROOT, ".."))
+            import rdna2
+            _RDNA = rdna2
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import rdna2_recomp as rdna2
+            _RDNA = rdna2
+    d = open(os.path.join(BINS_DIR, f"{idx}.bin"), "rb").read()
     ins, _ = _RDNA.sweep(d, 0, len(d))
     return 2 * wave if any(i.text.startswith(("ds_", "s_barrier")) for i in ins) else wave
 
@@ -167,9 +182,9 @@ def main():
     opt = lambda name, default: argv[argv.index(name) + 1] if name in argv else default
     max_bytes, limit, workers, wave = int(opt("--max-bytes", 20000)), int(opt("--limit", 100000)), int(opt("--workers", 6)), int(opt("--wave", 32))
     timeout = int(opt("--timeout", 240))
-    rows = [r for r in csv.DictReader(open(ROOT + "manifest_all.csv")) if r["stage"] == "CS" and int(r["bytes"]) <= max_bytes]
+    rows = [r for r in csv.DictReader(open(MANIFEST)) if r["stage"] == "CS" and int(r.get("bytes") or os.path.getsize(os.path.join(BINS_DIR, f"{r['idx']}.bin"))) <= max_bytes]
     ids = opt("--ids", "").split(",") if "--ids" in argv else [r["idx"] for r in rows]
-    ids = [i for i in ids if os.path.exists(ROOT + f"binds_all/{i}.bind")][:limit]
+    ids = [i for i in ids if os.path.exists(os.path.join(BINDS_DIR, f"{i}.bind"))][:limit]
     results = []
     with cf.ThreadPoolExecutor(workers) as ex:
         for rec in ex.map(lambda i: one(i, wave, timeout), ids):

@@ -13,7 +13,7 @@ Assumptions that are NOT checked against hardware (the reference shares them wit
   * V# OOB_SELECT = 1 (harness descriptor): an index >= num_records reads as 0 and its stores are dropped; byte offsets are unchecked
   * floating-point transcendentals are compared with a small ULP tolerance (hardware rcp/exp/log are approximate)
 """
-import math, os, struct, sys
+import ctypes, ctypes.util, math, os, struct, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "rpf9shaders", "out_disasm"))
 sys.path.insert(0, os.environ.get("XBOX_RDNA2_DIR", r"E:/Programming/rpf9shaders/out_disasm"))
@@ -56,6 +56,34 @@ def f32(b):
     return struct.unpack('<f', struct.pack('<I', b & M32))[0]
 
 
+def _load_fmaf():
+    for name in ("m", "ucrtbase"):
+        path = ctypes.util.find_library(name)
+        if not path:
+            continue
+        try:
+            lib = ctypes.CDLL(path)
+            fn = lib.fmaf
+            fn.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
+            fn.restype = ctypes.c_float
+            return fn
+        except (OSError, AttributeError):
+            pass
+    return None
+
+
+_FMAF = _load_fmaf()
+
+
+def fma32(a, b, c):
+    if _FMAF is not None:
+        return _FMAF(a, b, c)
+    try:
+        return math.fma(a, b, c)
+    except ValueError:
+        return float("nan")
+
+
 def b32(x):
     try:
         return struct.unpack('<I', struct.pack('<f', x))[0]
@@ -65,6 +93,35 @@ def b32(x):
 
 def f16(b):
     return struct.unpack('<e', struct.pack('<H', b & 0xffff))[0]
+
+
+def b16(x):
+    if math.isnan(x):
+        return 0x7e00
+    try:
+        return struct.unpack('<H', struct.pack('<e', x))[0]
+    except OverflowError:
+        return 0xfc00 if math.copysign(1.0, x) < 0 else 0x7c00
+
+
+def f16_rtz(x):
+    if math.isnan(x):
+        return 0x7e00
+    sign = 0x8000 if (b32(x) >> 31) else 0
+    a = abs(x)
+    if math.isinf(a):
+        return sign | 0x7c00
+    if a >= 65520.0:
+        return sign | 0x7bff
+    h = struct.unpack('<H', struct.pack('<e', a))[0]
+    if f16(h) > a:
+        h -= 1
+    return sign | h
+
+
+def s16(x):
+    x &= 0xffff
+    return x - 0x10000 if x & 0x8000 else x
 
 
 def s32(x):
@@ -238,6 +295,8 @@ class Wave:
             return self.smem(inst, w, n)
         if f in ("VOP1", "VOP2", "VOPC", "VOP3"):
             return self.valu(inst, w, n, f)
+        if f == "VOP3P":
+            return self.vop3p(inst, w, n)
         if f == "MUBUF":
             return self.mubuf(inst, w, n)
         if f in ("MIMG", "MIMG+NSA1", "MIMG+NSA3", "MIMG+NSA2"):
@@ -292,16 +351,47 @@ class Wave:
             self.scc = int(r != 0)
         elif n == "s_brev_b32":
             self.swrite(sdst, int(format(a, "032b")[::-1], 2))
+        elif n == "s_ff1_i32_b32":
+            self.swrite(sdst, (a & -a).bit_length() - 1 if a else M32)
         elif n == "s_ff1_i32_b64":
             self.swrite(sdst, (a & -a).bit_length() - 1 if a else M32)
-        elif n == "s_bcnt1_i32_b64":
+        elif n == "s_flbit_i32_b32":
+            self.swrite(sdst, 32 - a.bit_length() if a else M32)
+        elif n == "s_flbit_i32_b64":
+            self.swrite(sdst, 64 - a.bit_length() if a else M32)
+        elif n in ("s_bcnt1_i32_b32", "s_bcnt1_i32_b64"):
             r = bin(a).count("1")
             self.swrite(sdst, r)
             self.scc = int(r != 0)
-        elif n in ("s_and_saveexec_b32", "s_and_saveexec_b64"):
+        elif n == "s_abs_i32":
+            r = abs(s32(a)) & M32
+            self.swrite(sdst, r)
+            self.scc = int(r != 0)
+        elif n == "s_sext_i32_i8":
+            v = a & 0xff
+            self.swrite(sdst, v - 0x100 if v & 0x80 else v)
+        elif n == "s_sext_i32_i16":
+            self.swrite(sdst, s16(a))
+        elif n in ("s_quadmask_b32", "s_quadmask_b64"):
+            r = 0
+            for q in range(16 if wide else 8):
+                if (a >> (4 * q)) & 0xf:
+                    r |= 1 << q
+            self.swrite(sdst, r, wide)
+            self.scc = int(r != 0)
+        elif n in (
+            "s_and_saveexec_b32", "s_and_saveexec_b64",
+            "s_or_saveexec_b32", "s_or_saveexec_b64",
+            "s_xor_saveexec_b32", "s_xor_saveexec_b64",
+            "s_andn2_saveexec_b32", "s_andn2_saveexec_b64",
+            "s_orn2_saveexec_b32", "s_orn2_saveexec_b64",
+            "s_nand_saveexec_b32", "s_nand_saveexec_b64",
+            "s_nor_saveexec_b32", "s_nor_saveexec_b64",
+        ):
             old = self.exec() if wide else self.s[126]
             self.swrite(sdst, old, wide)
-            new = a & old
+            op = n.split("_")[1]
+            new = {"and": a & old, "or": a | old, "xor": a ^ old, "andn2": a & ~old, "orn2": a | ~old, "nand": ~(a & old), "nor": ~(a | old)}[op] & mask
             self.set_exec(new if wide else (self.exec() & ~M32 | new))
             self.scc = int(new != 0)
         else:
@@ -332,6 +422,14 @@ class Wave:
         elif n == "s_sub_u32":
             self.scc = int(b > a)
             self.swrite(sdst, a - b)
+        elif n == "s_addc_u32":
+            t = a + b + self.scc
+            self.scc = int(t > M32)
+            self.swrite(sdst, t)
+        elif n == "s_subb_u32":
+            t = a - b - self.scc
+            self.scc = int(t < 0)
+            self.swrite(sdst, t)
         elif n == "s_lshl_b32":
             r = (a << (b & 31)) & M32
             self.swrite(sdst, r)
@@ -340,10 +438,24 @@ class Wave:
             r = a >> (b & 31)
             self.swrite(sdst, r)
             self.scc = int(r != 0)
+        elif n == "s_lshl_b64":
+            r = (a << (self.sread(s1, inst, False) & 63)) & mask
+            self.swrite(sdst, r, True)
+            self.scc = int(r != 0)
+        elif n == "s_lshr_b64":
+            r = a >> (self.sread(s1, inst, False) & 63)
+            self.swrite(sdst, r, True)
+            self.scc = int(r != 0)
         elif n == "s_ashr_i32":
             r = (s32(a) >> (b & 31)) & M32
             self.swrite(sdst, r)
             self.scc = int(r != 0)
+        elif n == "s_pack_ll_b32_b16":
+            self.swrite(sdst, (a & 0xffff) | ((b & 0xffff) << 16))
+        elif n == "s_pack_lh_b32_b16":
+            self.swrite(sdst, (a & 0xffff) | (b & 0xffff0000))
+        elif n == "s_pack_hh_b32_b16":
+            self.swrite(sdst, (a >> 16) | (b & 0xffff0000))
         elif n == "s_min_u32":
             self.swrite(sdst, min(a, b)); self.scc = int(a < b)
         elif n == "s_max_u32":
@@ -369,6 +481,8 @@ class Wave:
             raise Unsupported(n)
 
     def sopk(self, inst, w, n):
+        if n in ("s_waitcnt_vscnt", "s_waitcnt_vmcnt", "s_waitcnt_expcnt", "s_waitcnt_lgkmcnt"):
+            return None
         simm, sdst = w & 0xffff, (w >> 16) & 0x7f
         sv = simm - 0x10000 if simm & 0x8000 else simm
         if n == "s_movk_i32":
@@ -377,6 +491,8 @@ class Wave:
             r = s32(self.s[sdst]) + sv
             self.scc = int(not -(1 << 31) <= r < (1 << 31))
             self.swrite(sdst, r)
+        elif n == "s_mulk_i32":
+            self.swrite(sdst, s32(self.s[sdst]) * sv)
         elif n.startswith("s_cmpk_"):
             _, _, rel, ty = n.split("_")
             a = self.s[sdst]
@@ -389,6 +505,16 @@ class Wave:
 
     def sopc(self, inst, w, n):
         s0, s1 = w & 0xff, (w >> 8) & 0xff
+        if n in ("s_bitcmp0_b32", "s_bitcmp1_b32"):
+            a, b = self.sread(s0, inst), self.sread(s1, inst) & 31
+            bit = (a >> b) & 1
+            self.scc = int(bit == (1 if "1" in n else 0))
+            return
+        if n in ("s_bitcmp0_b64", "s_bitcmp1_b64"):
+            a, b = self.sread(s0, inst, True), self.sread(s1, inst) & 63
+            bit = (a >> b) & 1
+            self.scc = int(bit == (1 if "1" in n else 0))
+            return
         a, b = self.sread(s0, inst), self.sread(s1, inst)
         _, _, rel, ty = n.split("_")
         if ty == "i32":
@@ -434,7 +560,7 @@ class Wave:
             omod, neg = (w1 >> 27) & 3, (w1 >> 29) & 7
             if omod and "_f32" not in n:
                 raise Unsupported("omod on " + n)
-            if (w >> 11) & 0xf:
+            if ((w >> 11) & 0xf) and n != "v_pack_b32_f16":
                 raise Unsupported("op_sel on " + n)
         if f == "VOPC":
             n = VOPC_NAMES.get((w >> 17) & 0xff) or "?"
@@ -442,6 +568,33 @@ class Wave:
             n = VOPC_NAMES.get((w >> 16) & 0x3ff) or "?"
         if n == "?":
             raise Unsupported("VOPC opcode")
+        if f == "VOP3" and n in ("v_readlane_b32", "v_writelane_b32"):
+            lane_idx = self.sread(src[1], inst) & 63
+            if n == "v_readlane_b32":
+                self.swrite(vdst & 0x7f, self.vsrc(src[0], inst, lane_idx))
+            else:
+                self.v[vdst][lane_idx] = self.sread(src[0], inst) & M32
+            return
+        if f == "VOP3" and n == "v_pack_b32_f16":
+            op_sel = (w >> 11) & 0xf
+            lanes_exec = self.exec()
+            for lane in range(WAVE):
+                if not (lanes_exec >> lane) & 1:
+                    continue
+                r0 = self.vsrc(src[0], inst, lane)
+                r1 = self.vsrc(src[1], inst, lane)
+                h0 = (r0 >> 16) if (op_sel & 1) else (r0 & 0xffff)
+                h1 = (r1 >> 16) if (op_sel & 2) else (r1 & 0xffff)
+                if absm & 1:
+                    h0 &= 0x7fff
+                if neg & 1:
+                    h0 ^= 0x8000
+                if absm & 2:
+                    h1 &= 0x7fff
+                if neg & 2:
+                    h1 ^= 0x8000
+                self.v[vdst][lane] = h0 | (h1 << 16)
+            return
         isf = "_f32" in n and "cvt" not in n
         is_cmp = n.startswith("v_cmp")
         lanes_exec = self.exec()
@@ -449,7 +602,7 @@ class Wave:
         for lane in range(WAVE):
             act = (lanes_exec >> lane) & 1
             if not act and not (is_cmp and not n.startswith("v_cmpx")):
-                continue   # cmp (non-x) writes 0 for inactive lanes in the mask; handled below
+                continue
             a = [self.vsrc(c, inst, lane) if i < len(src) else 0 for i, c in enumerate(src)]
             if f == "VOP3":
                 for i in range(len(a)):
@@ -466,7 +619,7 @@ class Wave:
             r = self.lane_op(n, a, inst, f, lane, vdst, w)
             if r is None:
                 continue
-            if isinstance(r, tuple):   # (value, carry)
+            if isinstance(r, tuple):
                 r, carry = r
                 res_mask |= carry << lane
             if omod:
@@ -481,15 +634,148 @@ class Wave:
             return
         if is_cmp:
             if n.startswith("v_cmpx"):
-                self.set_exec(res_mask)   # RDNA2: v_cmpx writes EXEC only (VCC is not written); a VOP3 form also writes its explicit SGPR destination
+                self.set_exec(res_mask)
                 if f == "VOP3" and vdst not in (125, 126):
                     self.s[vdst], self.s[vdst + 1] = res_mask & M32, (res_mask >> 32) & M32
             else:
                 dst = 106 if f == "VOPC" else vdst
                 self.s[dst], self.s[dst + 1] = res_mask & M32, (res_mask >> 32) & M32
         elif "_co_" in n:
-            dst = (w >> 8) & 0x7f
+            dst = 106 if f == "VOP2" else ((w >> 8) & 0x7f)
             self.s[dst], self.s[dst + 1] = res_mask & M32, (res_mask >> 32) & M32
+
+    def vop3p(self, inst, w, n):
+        w1 = inst.words[1]
+        vdst = w & 0xff
+        neg_hi = (w >> 8) & 7
+        op_sel = (w >> 11) & 7
+        op_sel_hi = ((w1 >> 27) & 3) | (((w >> 14) & 1) << 2)
+        clamp = (w >> 15) & 1
+        neg = (w1 >> 29) & 7
+        src = [w1 & 0x1ff, (w1 >> 9) & 0x1ff, (w1 >> 18) & 0x1ff]
+        lanes_exec = self.exec()
+        if n in ("v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16"):
+            for lane in range(WAVE):
+                if not (lanes_exec >> lane) & 1:
+                    continue
+                vals = []
+                for i in range(3):
+                    raw = self.vsrc(src[i], inst, lane)
+                    if (op_sel_hi >> i) & 1:
+                        h = (raw >> 16) if ((op_sel >> i) & 1) else (raw & 0xffff)
+                        bits = b32(f16(h))
+                    else:
+                        bits = raw
+                    if (neg_hi >> i) & 1:
+                        bits &= 0x7fffffff
+                    if (neg >> i) & 1:
+                        bits ^= 0x80000000
+                    vals.append(f32(bits))
+                res = fma32(vals[0], vals[1], vals[2])
+                if clamp:
+                    res = 0.0 if math.isnan(res) else min(max(res, 0.0), 1.0)
+                if n == "v_fma_mix_f32":
+                    self.v[vdst][lane] = b32(res)
+                elif n == "v_fma_mixlo_f16":
+                    self.v[vdst][lane] = (self.v[vdst][lane] & 0xffff0000) | b16(res)
+                else:
+                    self.v[vdst][lane] = (self.v[vdst][lane] & 0x0000ffff) | (b16(res) << 16)
+            return
+        if n in ("v_pk_add_f16", "v_pk_mul_f16", "v_pk_fma_f16", "v_pk_min_f16", "v_pk_max_f16"):
+            n_src = 3 if n == "v_pk_fma_f16" else 2
+            for lane in range(WAVE):
+                if not (lanes_exec >> lane) & 1:
+                    continue
+                raws = [self.vsrc(src[i], inst, lane) for i in range(n_src)]
+                out_h = []
+                for hi in (0, 1):
+                    sel = op_sel_hi if hi else op_sel
+                    ng = neg_hi if hi else neg
+                    v = []
+                    for i in range(n_src):
+                        h = (raws[i] >> 16) if ((sel >> i) & 1) else (raws[i] & 0xffff)
+                        if (ng >> i) & 1:
+                            h ^= 0x8000
+                        v.append(f16(h))
+                    if n == "v_pk_add_f16":
+                        r = v[0] + v[1]
+                    elif n == "v_pk_mul_f16":
+                        r = v[0] * v[1]
+                    elif n == "v_pk_fma_f16":
+                        r = fma32(v[0], v[1], v[2])
+                    elif n == "v_pk_min_f16":
+                        r = v[1] if math.isnan(v[0]) else (v[0] if math.isnan(v[1]) else min(v[0], v[1]))
+                    else:
+                        r = v[1] if math.isnan(v[0]) else (v[0] if math.isnan(v[1]) else max(v[0], v[1]))
+                    if clamp:
+                        r = 0.0 if math.isnan(r) else min(max(r, 0.0), 1.0)
+                    out_h.append(b16(r))
+                self.v[vdst][lane] = out_h[0] | (out_h[1] << 16)
+            return
+        if n in (
+            "v_pk_add_u16", "v_pk_add_i16", "v_pk_sub_u16", "v_pk_sub_i16",
+            "v_pk_mul_lo_u16", "v_pk_min_u16", "v_pk_max_u16", "v_pk_min_i16", "v_pk_max_i16",
+            "v_pk_lshlrev_b16", "v_pk_lshrrev_b16", "v_pk_ashrrev_i16",
+        ):
+            for lane in range(WAVE):
+                if not (lanes_exec >> lane) & 1:
+                    continue
+                r0 = self.vsrc(src[0], inst, lane)
+                r1 = self.vsrc(src[1], inst, lane)
+                out_h = []
+                for hi in (0, 1):
+                    sel = op_sel_hi if hi else op_sel
+                    a0 = (r0 >> 16) if (sel & 1) else (r0 & 0xffff)
+                    a1 = (r1 >> 16) if (sel & 2) else (r1 & 0xffff)
+                    if n == "v_pk_add_u16":
+                        res = min(a0 + a1, 0xffff) if clamp else (a0 + a1)
+                    elif n == "v_pk_add_i16":
+                        res = s16(a0) + s16(a1)
+                        if clamp:
+                            res = min(max(res, -32768), 32767)
+                    elif n == "v_pk_sub_u16":
+                        res = max(a0 - a1, 0) if clamp else (a0 - a1)
+                    elif n == "v_pk_sub_i16":
+                        res = s16(a0) - s16(a1)
+                        if clamp:
+                            res = min(max(res, -32768), 32767)
+                    elif n == "v_pk_mul_lo_u16":
+                        res = a0 * a1
+                    elif n == "v_pk_min_u16":
+                        res = min(a0, a1)
+                    elif n == "v_pk_max_u16":
+                        res = max(a0, a1)
+                    elif n == "v_pk_min_i16":
+                        res = min(s16(a0), s16(a1))
+                    elif n == "v_pk_max_i16":
+                        res = max(s16(a0), s16(a1))
+                    elif n == "v_pk_lshlrev_b16":
+                        res = a1 << (a0 & 15)
+                    elif n == "v_pk_lshrrev_b16":
+                        res = a1 >> (a0 & 15)
+                    else:
+                        res = s16(a1) >> (a0 & 15)
+                    out_h.append(res & 0xffff)
+                self.v[vdst][lane] = out_h[0] | (out_h[1] << 16)
+            return
+        if n == "v_dot2_f32_f16":
+            for lane in range(WAVE):
+                if not (lanes_exec >> lane) & 1:
+                    continue
+                r0 = self.vsrc(src[0], inst, lane)
+                r1 = self.vsrc(src[1], inst, lane)
+                r2 = self.vsrc(src[2], inst, lane)
+                a0l = ((r0 >> 16) if (op_sel & 1) else (r0 & 0xffff)) ^ (0x8000 if (neg & 1) else 0)
+                a1l = ((r1 >> 16) if (op_sel & 2) else (r1 & 0xffff)) ^ (0x8000 if (neg & 2) else 0)
+                a0h = ((r0 >> 16) if (op_sel_hi & 1) else (r0 & 0xffff)) ^ (0x8000 if (neg_hi & 1) else 0)
+                a1h = ((r1 >> 16) if (op_sel_hi & 2) else (r1 & 0xffff)) ^ (0x8000 if (neg_hi & 2) else 0)
+                c_bits = (r2 & 0x7fffffff if (neg_hi & 4) else r2) ^ (0x80000000 if (neg & 4) else 0)
+                res = f32(b32(f16(a0l) * f16(a1l))) + f32(b32(f16(a0h) * f16(a1h))) + f32(c_bits)
+                if clamp:
+                    res = 0.0 if math.isnan(res) else min(max(res, 0.0), 1.0)
+                self.v[vdst][lane] = b32(res)
+            return
+        raise Unsupported("format VOP3P (%s)" % n)
 
     def cmp(self, n, a, b):
         if "_class_f32" in n:
@@ -540,25 +826,30 @@ class Wave:
             "v_subrev_f32": lambda: b32(f32(B) - f32(A)),
             "v_mul_f32": lambda: b32(f32(A) * f32(B)),
             "v_mul_legacy_f32": lambda: 0 if (f32(A) == 0 or f32(B) == 0) else b32(f32(A) * f32(B)),
+            "v_fma_legacy_f32": lambda: b32(0.0 + f32(C)) if (f32(A) == 0 or f32(B) == 0) else b32(fma32(f32(A), f32(B), f32(C))),
+            "v_fmac_legacy_f32": lambda: b32(0.0 + f32(self.v[vdst][lane])) if (f32(A) == 0 or f32(B) == 0) else b32(fma32(f32(A), f32(B), f32(self.v[vdst][lane]))),
+            "v_mad_legacy_f32": lambda: b32(0.0 + f32(C)) if (f32(A) == 0 or f32(B) == 0) else b32(f32(b32(f32(A) * f32(B))) + f32(C)),
             "v_min_f32": lambda: b32(min(f32(A), f32(B))),
             "v_max_f32": lambda: b32(max(f32(A), f32(B))),
             "v_mad_f32": lambda: b32(f32(b32(f32(A) * f32(B))) + f32(C)),
             "v_mac_f32": lambda: b32(f32(b32(f32(A) * f32(B))) + f32(self.v[vdst][lane])),
-            "v_fma_f32": lambda: b32(math.fma(f32(A), f32(B), f32(C))),
-            "v_fmac_f32": lambda: b32(math.fma(f32(A), f32(B), f32(self.v[vdst][lane]))),
+            "v_fma_f32": lambda: b32(fma32(f32(A), f32(B), f32(C))),
+            "v_fmac_f32": lambda: b32(fma32(f32(A), f32(B), f32(self.v[vdst][lane]))),
             "v_madak_f32": lambda: b32(f32(b32(f32(A) * f32(B))) + f32(self.lit(inst))),
             "v_madmk_f32": lambda: b32(f32(b32(f32(A) * f32(self.lit(inst)))) + f32(B)),
-            "v_fmaak_f32": lambda: b32(math.fma(f32(A), f32(B), f32(self.lit(inst)))),
-            "v_fmamk_f32": lambda: b32(math.fma(f32(A), f32(self.lit(inst)), f32(B))),
+            "v_fmaak_f32": lambda: b32(fma32(f32(A), f32(B), f32(self.lit(inst)))),
+            "v_fmamk_f32": lambda: b32(fma32(f32(A), f32(self.lit(inst)), f32(B))),
             "v_max3_f32": lambda: b32(max(f32(A), f32(B), f32(C))),
             "v_min3_f32": lambda: b32(min(f32(A), f32(B), f32(C))),
             "v_med3_f32": lambda: b32(sorted((f32(A), f32(B), f32(C)))[1]),
             "v_ceil_f32": lambda: b32(float(math.ceil(f32(A)))) if math.isfinite(f32(A)) else A,
             "v_floor_f32": lambda: b32(float(math.floor(f32(A)))) if math.isfinite(f32(A)) else A,
             "v_trunc_f32": lambda: b32(float(math.trunc(f32(A)))) if math.isfinite(f32(A)) else A,
-            "v_rndne_f32": lambda: b32(float(round(f32(A)))) if math.isfinite(f32(A)) else A,   # Python round() is round-half-even
+            "v_rndne_f32": lambda: b32(float(round(f32(A)))) if math.isfinite(f32(A)) else A,
             "v_fract_f32": lambda: _fract(A),
             "v_cvt_f32_f16": lambda: b32(f16(A)),
+            "v_cvt_f16_f32": lambda: b16(f32(A)),
+            "v_cvt_pkrtz_f16_f32": lambda: f16_rtz(f32(A)) | (f16_rtz(f32(B)) << 16),
             "v_cvt_f32_u32": lambda: b32(float(A)),
             "v_cvt_f32_i32": lambda: b32(float(s32(A))),
             "v_cvt_f32_ubyte0": lambda: b32(float(A & 0xff)),
@@ -608,6 +899,14 @@ class Wave:
             "v_mad_u32_u24": lambda: (A & 0xffffff) * (B & 0xffffff) + C,
             "v_mul_u32_u24": lambda: (A & 0xffffff) * (B & 0xffffff),
             "v_bfe_u32": lambda: (A >> (B & 31)) & ((1 << (C & 31)) - 1),
+            "v_bfi_b32": lambda: (A & B) | (~A & C),
+            "v_bfrev_b32": lambda: int(format(A & M32, "032b")[::-1], 2),
+            "v_alignbit_b32": lambda: (((A & M32) << 32) | (B & M32)) >> (C & 31),
+            "v_alignbyte_b32": lambda: (((A & M32) << 32) | (B & M32)) >> ((C & 3) * 8),
+            "v_bcnt_u32_b32": lambda: bin(A & M32).count("1") + B,
+            "v_ffbh_u32": lambda: (32 - (A & M32).bit_length()) if (A & M32) else M32,
+            "v_ffbl_b32": lambda: ((A & -A).bit_length() - 1) if (A & M32) else M32,
+            "v_not_b32": lambda: ~A,
             "v_med3_u32": lambda: sorted((A, B, C))[1],
             "v_med3_i32": lambda: sorted((s32(A), s32(B), s32(C)))[1],
             "v_mbcnt_lo_u32_b32": lambda: bin(A & ((1 << lane) - 1) & M32 if lane < 32 else A & M32).count("1") + B,
@@ -618,8 +917,13 @@ class Wave:
         if n == "v_cndmask_b32":
             mask = (self.s[106] | (self.s[107] << 32)) if f in ("VOP1", "VOP2") else (self.sread(a_code(inst, 2), inst, True))
             return B if (mask >> lane) & 1 else A
-        if n in ("v_add_co_u32", "v_sub_co_u32"):
-            r = A + B if n == "v_add_co_u32" else A - B
+        if n in ("v_add_co_u32", "v_sub_co_u32", "v_subrev_co_u32"):
+            r = (A + B) if n == "v_add_co_u32" else ((A - B) if n == "v_sub_co_u32" else (B - A))
+            return (r & M32, int(r > M32 or r < 0))
+        if n in ("v_add_co_ci_u32", "v_sub_co_ci_u32", "v_subrev_co_ci_u32"):
+            mask = (self.s[106] | (self.s[107] << 32)) if f == "VOP2" else self.sread(a_code(inst, 2), inst, True)
+            ci = (mask >> lane) & 1
+            r = (A + B + ci) if n == "v_add_co_ci_u32" else ((A - B - ci) if n == "v_sub_co_ci_u32" else (B - A - ci))
             return (r & M32, int(r > M32 or r < 0))
         raise Unsupported(n)
 
@@ -629,19 +933,21 @@ class Wave:
         return w0 | ((w1 & 0xffff) << 32), (w1 >> 16) & 0x3fff, w2
 
     def mubuf(self, inst, w, n):
-        if (w >> 25) & 1:
-            # MUBUF opcodes are 8 bits wide (the recompiler decodes bit 25 as bit 7); rdna2.py drops it and names the D16 forms
-            # (0x80+, half-precision data in packed registers) as their 32-bit twins
-            raise Unsupported("MUBUF D16 opcode 0x%x" % (((w >> 18) & 0x7f) | 0x80))
+        op8 = ((w >> 18) & 0x7f) | (((w >> 25) & 1) << 7)
+        d16 = (w >> 25) & 1
+        if d16 and op8 not in (0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87):
+            raise Unsupported("MUBUF D16 opcode 0x%x" % op8)
         w1 = inst.words[1]
         off = w & 0xfff
         offen, idxen = (w >> 12) & 1, (w >> 13) & 1
         vaddr, vdata, srsrc, soff = w1 & 0xff, (w1 >> 8) & 0xff, ((w1 >> 16) & 0x1f) * 4, (w1 >> 24) & 0xff
         base, stride, nrec = self.vsharp(srsrc)
         soffv = self.sread(soff, inst)
-        # register layout of the address: idx then offset when both are enabled
         lane_exec = self.exec()
-        if n.startswith("buffer_load_dword") or n.startswith("buffer_load_format"):
+        if d16:
+            comps = (op8 & 3) + 1
+            store = op8 >= 0x84
+        elif n.startswith("buffer_load_dword") or n.startswith("buffer_load_format"):
             comps = {"x": 1, "xy": 2, "xyz": 3, "xyzw": 4}[n.rsplit("_", 1)[1]] if "format" in n else {"dword": 1, "dwordx2": 2, "dwordx3": 3, "dwordx4": 4}[n.rsplit("_", 1)[1]]
             store = False
         elif n.startswith("buffer_store_dword") or n.startswith("buffer_store_format"):
@@ -651,7 +957,6 @@ class Wave:
             comps, store = 1, "atomic"
         else:
             raise Unsupported(n)
-        fmt = "format" in n
         for lane in range(WAVE):
             if not (lane_exec >> lane) & 1:
                 continue
@@ -662,19 +967,34 @@ class Wave:
             if offen:
                 voff = self.v[k][lane]
             if idxen:
-                if idx >= nrec:
-                    inrange = False
-                else:
-                    inrange = True
+                inrange = idx < nrec
                 addr = base + idx * stride + voff + off + soffv
             else:
-                inrange = True    # V# OOB_SELECT 1 (the harness descriptor): only the index is range checked, and idx is 0 here
+                inrange = True
                 addr = base + voff + off + soffv
             if inrange and addr & 3:
-                # a dword access at a byte address that is not 4-aligned: undefined for D3D buffers; the recompiler reads the
-                # containing aligned dword, hardware may assemble it from two. No reference value, so do not guess.
                 raise Unsupported("unaligned dword buffer access")
-            if store is True:
+            if d16:
+                if store:
+                    if inrange:
+                        vals = []
+                        for c in range(comps):
+                            word = self.v[vdata + (c // 2)][lane]
+                            h = (word >> 16) if (c & 1) else (word & 0xffff)
+                            vals.append(b32(f16(h)))
+                        self.mem.write(addr, b"".join(struct.pack('<I', v) for v in vals))
+                else:
+                    halves = [b16(f32(self.mem.u32(addr + 4 * c))) if inrange else 0 for c in range(comps)]
+                    if comps == 1:
+                        self.v[vdata][lane] = halves[0]
+                    else:
+                        for c in range(0, comps, 2):
+                            dst_r = vdata + (c // 2)
+                            if c + 1 == comps:
+                                self.v[dst_r][lane] = (self.v[dst_r][lane] & 0xffff0000) | halves[c]
+                            else:
+                                self.v[dst_r][lane] = halves[c] | (halves[c + 1] << 16)
+            elif store is True:
                 if inrange:
                     data = b"".join(struct.pack('<I', self.v[vdata + c][lane]) for c in range(comps))
                     self.mem.write(addr, data)
@@ -682,16 +1002,14 @@ class Wave:
                 if inrange:
                     old = self.mem.u32(addr)
                     self.mem.write(addr, struct.pack('<I', (old + self.v[vdata][lane]) & M32))
-                    if (w >> 14) & 1:   # glc: return the old value
+                    if (w >> 14) & 1:
                         self.v[vdata][lane] = old
             else:
                 for c in range(comps):
                     self.v[vdata + c][lane] = self.mem.u32(addr + 4 * c) if inrange else 0
-        # format loads of fewer than 4 components leave the rest to the shader; nothing more to do
 
     def mimg(self, inst, w, n):
-        """2D RGBA32F images only (the harness image model): image_load, image_store, image_sample_lz, image_sample_l.
-        Sampling is nearest with clamp-to-edge on normalised coordinates, like the harness sampler."""
+        """1D, 2D, 2D-array, and 3D RGBA32F images (harness image model): load, store, sample, gather4."""
         op = ((w >> 18) & 0x7f) | ((w & 1) << 7)
         nsa = (w >> 1) & 3
         dmask, dim = (w >> 8) & 0xf, (w >> 3) & 7
@@ -699,54 +1017,107 @@ class Wave:
         vaddr, vdata, srsrc = w1 & 0xff, (w1 >> 8) & 0xff, ((w1 >> 16) & 0x1f) * 4
         if (w1 >> 30) & 1 or (w1 >> 31) & 1:
             raise Unsupported("a16/d16 image access")
-        if dim not in (1, 5):
+        if dim not in (0, 1, 2, 5):
             raise Unsupported("image dim %d" % dim)
-        nco = 2 + (dim == 5)       # coordinates: x, y and, for a 2D array, the slice
-        # op -> (kind, address registers, index of the first coordinate). The harness image has one mip level and a nearest/clamp sampler,
-        # so implicit LODs, biases and explicit gradients cannot change which texel is read: sample, _lz, _l, _b and _d all read level 0.
-        kinds = {0x00: ("load", nco, 0), 0x08: ("store", nco, 0), 0x20: ("sample", nco, 0), 0x27: ("sample", nco, 0), 0x24: ("sample", nco + 1, 0),
-                 0x25: ("sample", nco + 1, 1), 0x22: ("sample", nco + 4, 4)}
+        nco = {0: 1, 1: 2, 2: 3, 5: 3}[dim]
+        d_grads = {0: 2, 1: 4, 2: 6, 5: 4}[dim]
+        kinds = {
+            0x00: ("load", nco, 0),
+            0x08: ("store", nco, 0),
+            0x20: ("sample", nco, 0),
+            0x27: ("sample", nco, 0),
+            0x24: ("sample", nco + 1, 0),
+            0x25: ("sample", nco + 1, 1),
+            0x22: ("sample", nco + d_grads, d_grads),
+            0x40: ("gather4", nco, 0),
+            0x47: ("gather4", nco, 0),
+            0x44: ("gather4", nco + 1, 0),
+            0x45: ("gather4", nco + 1, 1),
+            0x42: ("gather4", nco + d_grads, d_grads),
+        }
         if op not in kinds:
             raise Unsupported("MIMG opcode 0x%x" % op)
         kind, naddr, c0 = kinds[op]
+        if kind == "gather4" and (dim not in (1, 5) or dmask not in (1, 2, 4, 8)):
+            raise Unsupported("gather4 dim/dmask")
         regs = [vaddr + i for i in range(naddr)]
         if nsa:
             regs = [vaddr]
             for word in inst.words[2:]:
                 regs += [(word >> (8 * b)) & 0xff for b in range(4)]
             regs = regs[:naddr]
-        elif nsa == 0 and False:
-            pass
         words = [self.s[srsrc + k] for k in range(8)]
         base = (words[0] << 8) | ((words[1] & 0xff) << 40)
         img_id = (base - 0x7000000000) >> 24
         img = self.images.get(img_id) if base >= 0x7000000000 and (base - 0x7000000000) % 0x1000000 == 0 else None
         if img is None:
             raise Unsupported("image descriptor does not name a known image")
-        wd, ht, layers = img["w"], img["h"], img.get("layers", 1)
-        if (dim == 5) != (layers > 1):
+        wd, ht = img["w"], img["h"]
+        depth = img.get("depth", 1)
+        layers = img.get("layers", 1)
+        im_dim = img.get("dim", "2d" if layers == 1 else "2da")
+        expected_dim = {0: "1d", 1: "2d", 2: "3d", 5: "2da"}[dim]
+        if im_dim != expected_dim:
             raise Unsupported("image dim does not match the image")
+        slices = depth if dim == 2 else layers
         comps = [c for c in range(4) if (dmask >> c) & 1]
         ex = self.exec()
         for lane in range(WAVE):
             if not (ex >> lane) & 1:
                 continue
             a = [self.v[r][lane] for r in regs]
-            if kind == "sample":
+            if kind == "gather4":
                 u, v = f32(a[c0]), f32(a[c0 + 1])
                 if not (math.isfinite(u) and math.isfinite(v)):
                     raise Unsupported("non-finite sample coordinate")
-                x = min(max(math.floor(f32(b32(u * wd))), 0), wd - 1)
-                y = min(max(math.floor(f32(b32(v * ht))), 0), ht - 1)
                 z = 0
                 if dim == 5:
                     sl = f32(a[c0 + 2])
                     if not math.isfinite(sl):
                         raise Unsupported("non-finite array slice")
                     z = min(max(round(sl), 0), layers - 1)
+                us = f32(b32(u * wd)) - 0.5
+                vs = f32(b32(v * ht)) - 0.5
+                if abs(us - round(us)) < 1e-4 or abs(vs - round(vs)) < 1e-4:
+                    raise Unsupported("gather4 tie-break boundary")
+                i0 = math.floor(us)
+                j0 = math.floor(vs)
+                cx0, cx1 = min(max(i0, 0), wd - 1), min(max(i0 + 1, 0), wd - 1)
+                cy0, cy1 = min(max(j0, 0), ht - 1), min(max(j0 + 1, 0), ht - 1)
+                comp = comps[0]
+                pts = ((cx0, cy1), (cx1, cy1), (cx1, cy0), (cx0, cy0))
+                for k, (px, py) in enumerate(pts):
+                    self.v[vdata + k][lane] = img["data"][((z * ht + py) * wd + px) * 4 + comp]
+                continue
+            if kind == "sample":
+                u = f32(a[c0])
+                if not math.isfinite(u):
+                    raise Unsupported("non-finite sample coordinate")
+                x = min(max(math.floor(f32(b32(u * wd))), 0), wd - 1)
+                y = 0
+                z = 0
+                if dim >= 1:
+                    v = f32(a[c0 + 1])
+                    if not math.isfinite(v):
+                        raise Unsupported("non-finite sample coordinate")
+                    y = min(max(math.floor(f32(b32(v * ht))), 0), ht - 1)
+                if dim == 2:
+                    w_c = f32(a[c0 + 2])
+                    if not math.isfinite(w_c):
+                        raise Unsupported("non-finite sample coordinate")
+                    z = min(max(math.floor(f32(b32(w_c * depth))), 0), depth - 1)
+                elif dim == 5:
+                    sl = f32(a[c0 + 2])
+                    if not math.isfinite(sl):
+                        raise Unsupported("non-finite array slice")
+                    z = min(max(round(sl), 0), layers - 1)
             else:
-                x, y, z = s32(a[0]), s32(a[1]), (s32(a[2]) if dim == 5 else 0)
-                if not (0 <= x < wd and 0 <= y < ht and 0 <= z < layers):
+                x = s32(a[0])
+                y = s32(a[1]) if dim >= 1 else 0
+                z = s32(a[2]) if dim in (2, 5) else 0
+                if not (0 <= x < wd and 0 <= y < ht and 0 <= z < slices):
+                    if kind == "store":
+                        continue
                     raise Unsupported("image access out of bounds")
             texel = ((z * ht + y) * wd + x) * 4
             if kind == "store":
@@ -757,7 +1128,7 @@ class Wave:
                     if prev is not None and prev[0] != lane and prev[1] != val:
                         raise Unsupported("racing image stores")
                     img["written"][key] = (lane, val)
-                    img["data"][texel + c] = val & M32     # raw bits: a float round trip would quiet signalling NaNs
+                    img["data"][texel + c] = val & M32
             else:
                 for k, c in enumerate(comps):
                     self.v[vdata + k][lane] = img["data"][texel + c]
@@ -773,9 +1144,9 @@ class Wave:
             for lane in range(WAVE):
                 if not (ex >> lane) & 1:
                     continue
-                if off16 & 0x8000:      # quad permute: two bits per lane of the quad
+                if off16 & 0x8000:
                     sl = (lane & ~3) | ((off16 >> (2 * (lane & 3))) & 3)
-                else:                    # bit masks inside each group of 32 lanes
+                else:
                     sl = (lane & ~31) | ((((lane & 31) & (off16 & 31)) | ((off16 >> 5) & 31)) ^ ((off16 >> 10) & 31))
                 self.v[vdst][lane] = src[sl] if (ex >> sl) & 1 else 0
             return
@@ -794,14 +1165,34 @@ class Wave:
                 wr(a + off16, self.v[d0][lane])
             elif n == "ds_read_b32":
                 self.v[vdst][lane] = rd(a + off16)
+            elif n == "ds_write_b64":
+                wr(a + off16, self.v[d0][lane]); wr(a + off16 + 4, self.v[d0 + 1][lane])
+            elif n == "ds_read_b64":
+                self.v[vdst][lane] = rd(a + off16); self.v[vdst + 1][lane] = rd(a + off16 + 4)
+            elif n == "ds_write_b128":
+                for k in range(4):
+                    wr(a + off16 + 4 * k, self.v[d0 + k][lane])
+            elif n == "ds_read_b128":
+                for k in range(4):
+                    self.v[vdst + k][lane] = rd(a + off16 + 4 * k)
             elif n == "ds_write2_b32":
                 wr(a + o0 * 4, self.v[d0][lane]); wr(a + o1 * 4, self.v[d1][lane])
             elif n == "ds_read2_b32":
                 self.v[vdst][lane] = rd(a + o0 * 4); self.v[vdst + 1][lane] = rd(a + o1 * 4)
-            elif n in ("ds_add_u32", "ds_max_u32", "ds_or_b32"):
+            elif n == "ds_write2st64_b32":
+                wr(a + o0 * 256, self.v[d0][lane]); wr(a + o1 * 256, self.v[d1][lane])
+            elif n == "ds_read2st64_b32":
+                self.v[vdst][lane] = rd(a + o0 * 256); self.v[vdst + 1][lane] = rd(a + o1 * 256)
+            elif n in ("ds_add_u32", "ds_min_u32", "ds_max_u32", "ds_or_b32", "ds_and_b32", "ds_xor_b32"):
                 old = rd(a + off16)
                 x = self.v[d0][lane]
-                wr(a + off16, {"ds_add_u32": old + x, "ds_max_u32": max(old, x), "ds_or_b32": old | x}[n])
+                wr(a + off16, {"ds_add_u32": old + x, "ds_min_u32": min(old, x), "ds_max_u32": max(old, x), "ds_or_b32": old | x, "ds_and_b32": old & x, "ds_xor_b32": old ^ x}[n])
+            elif n in ("ds_add_rtn_u32", "ds_min_rtn_u32", "ds_max_rtn_u32", "ds_or_rtn_b32", "ds_and_rtn_b32", "ds_xor_rtn_b32"):
+                old = rd(a + off16)
+                x = self.v[d0][lane]
+                op_name = n.replace("_rtn", "")
+                wr(a + off16, {"ds_add_u32": old + x, "ds_min_u32": min(old, x), "ds_max_u32": max(old, x), "ds_or_b32": old | x, "ds_and_b32": old & x, "ds_xor_b32": old ^ x}[op_name])
+                self.v[vdst][lane] = old
             else:
                 raise Unsupported(n)
 
