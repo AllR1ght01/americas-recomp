@@ -104,15 +104,19 @@ def fssm_from(nested):
     if marker < 0 or marker + 24 > len(nested):
         return None
     compressed, zero, uncompressed = struct.unpack_from("<III", nested, marker + 8)
-    if zero != 0 or uncompressed == 0 or compressed == 0:
+    if zero != 0 or not 0 < uncompressed <= CHUNK_LIMIT or compressed == 0:
         return None
     start = marker + 24
     if start + compressed > len(nested) or nested[start] & 0x0F != 0x08:
         return None
     try:
-        return zlib.decompress(nested[start : start + compressed])
+        inflater = zlib.decompressobj()
+        data = inflater.decompress(nested[start : start + compressed], uncompressed + 1)
     except zlib.error:
         return None
+    if not inflater.eof or len(data) != uncompressed:
+        return None
+    return data
 
 
 def strip_prologue(code):
