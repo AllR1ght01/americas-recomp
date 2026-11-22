@@ -110,12 +110,14 @@ class TestXboxDxilLower(unittest.TestCase):
         self.assertIn("%1 = fadd half %xl.1, %xl.2", res)
 
     def test_unlowered_intrinsic_reported(self):
-        body = "  %1 = call i32 @xbox.global_load_dword_with_cache(i32 1, i64 0)"
-        decls = "declare i32 @xbox.global_load_dword_with_cache(i32, i64) #0\n"
+        # A made-up name: it must stay unlowered however many real intrinsics lower() learns (global_load_dword_with_cache
+        # used to stand here and is now lowered through the address table).
+        body = "  %1 = call i32 @xbox.synthetic_never_lowered(i32 1, i64 0)"
+        decls = "declare i32 @xbox.synthetic_never_lowered(i32, i64) #0\n"
         res, n, left = xdl.lower(SAMPLE_BASE.replace("{body}", body).replace("{decls}", decls))
         self.assertEqual(n, 0)
-        self.assertEqual(left, {"xbox.global_load_dword_with_cache"})
-        self.assertIn("declare i32 @xbox.global_load_dword_with_cache(", res)
+        self.assertEqual(left, {"xbox.synthetic_never_lowered"})
+        self.assertIn("declare i32 @xbox.synthetic_never_lowered(", res)
 
     def test_dxil_sm66_wave_pins_wave_size(self):
         with tempfile.TemporaryDirectory(prefix="dxil_test_") as td:
