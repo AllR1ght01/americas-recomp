@@ -20,6 +20,14 @@ def blob_with_inputs(entries):
     return b
 
 
+def blob_with_vertex_inputs(entries):
+    b = bytearray(0x200)
+    for k, (register, mask, vgpr, top) in enumerate(entries):
+        p = 0x138 + 5 * k
+        b[p:p + 5] = bytes([6, register, mask, vgpr, top])
+    return b
+
+
 class PixelInputsTest(unittest.TestCase):
     def test_reads_entries_until_tag_changes(self):
         entries = [(1, 0xF, 0, 1, 0x00), (2, 0x3, 1, 2, 0x18), (5, 0x1, 2, 3, 0x08)]
@@ -42,6 +50,30 @@ class PixelInputsTest(unittest.TestCase):
     def test_table_stops_at_0x1d0(self):
         b = blob_with_inputs([(k, 0xF, k, k, 0) for k in range(24)])
         self.assertEqual(len(fssm.pixel_inputs(bytes(b))), (0x1D0 - 0x138) // 8)
+
+    def test_header_shorter_than_0x1d0(self):
+        self.assertEqual(fssm.pixel_inputs(bytes(0x100)), [])
+        self.assertEqual(fssm.interpolants(bytes(0x100)), (0, 0))
+        self.assertEqual(fssm.flat_mask(bytes(0x100)), 0)
+        b = blob_with_inputs([(k, 0xF, k, k, 0) for k in range(24)])
+        self.assertEqual(len(fssm.pixel_inputs(bytes(b[:0x150]))), 3)
+
+
+class VertexInputsTest(unittest.TestCase):
+    def test_reads_entries_until_tag_changes(self):
+        b = blob_with_vertex_inputs([(0, 0x7, 4, 2), (1, 0x3, 8, 1)])
+        self.assertEqual(fssm.vertex_inputs(bytes(b)), [(0, 0x7, 4, 3), (1, 0x3, 8, 2)])
+        self.assertEqual(fssm.vin_text(bytes(b)), "vin 4 3 0\nvin 8 2 1\n")
+
+    def test_table_stops_at_0x1d0(self):
+        b = blob_with_vertex_inputs([(k, 0xF, 4 + 4 * k, 3) for k in range(31)])
+        self.assertEqual(len(fssm.vertex_inputs(bytes(b))), (0x1D0 - 0x138) // 5)
+
+    def test_header_shorter_than_0x1d0(self):
+        self.assertEqual(fssm.vertex_inputs(bytes(0x100)), [])
+        self.assertEqual(fssm.vin_text(bytes(0x100)), "")
+        b = blob_with_vertex_inputs([(k, 0xF, 4 + 4 * k, 3) for k in range(31)])
+        self.assertEqual(len(fssm.vertex_inputs(bytes(b[:0x150]))), 4)
 
 
 class DirectoryTest(unittest.TestCase):

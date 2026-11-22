@@ -33,8 +33,8 @@ import struct, sys
 
 def pixel_inputs(blob: bytes):
     """Return [(semantic, mask, index, slot, flags)] from the pixel input table."""
-    out, p = [], 0x138
-    while p + 8 <= 0x1d0 and blob[p] == 6:
+    out, p, end = [], 0x138, min(len(blob), 0x1d0)
+    while p + 8 <= end and blob[p] == 6:
         out.append((blob[p + 1], blob[p + 2], blob[p + 3], blob[p + 6], blob[p + 7]))
         p += 8
     return out
@@ -42,8 +42,8 @@ def pixel_inputs(blob: bytes):
 
 def vertex_inputs(blob: bytes):
     """Return [(input register, read mask, first vgpr, vgpr count)] from a vertex shader's input table (empty when it has none)."""
-    out, p = [], 0x138
-    while p + 5 <= 0x1d0 and blob[p] == 6:
+    out, p, end = [], 0x138, min(len(blob), 0x1d0)
+    while p + 5 <= end and blob[p] == 6:
         out.append((blob[p + 1], blob[p + 2], blob[p + 3], blob[p + 4] + 1))
         p += 5
     return out
