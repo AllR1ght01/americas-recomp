@@ -3071,7 +3071,13 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
             const auto v = op(spv::OpFDiv, f32, jNum, tDenom);
             const auto zero = real(0u);
             const auto one = real(0x3f800000u);
-            const auto missed = either(either(either(op(spv::OpFOrdLessThan, boolean, u, zero), op(spv::OpFOrdGreaterThan, boolean, u, one)), either(op(spv::OpFOrdLessThan, boolean, v, zero), op(spv::OpFOrdGreaterThan, boolean, op(spv::OpFAdd, f32, u, v), one))), op(spv::OpFOrdLessThan, boolean, t, zero));
+            const auto missed = either(
+                either(
+                    either(op(spv::OpFUnordLessThan, boolean, u, zero), op(spv::OpFUnordGreaterThan, boolean, u, one)),
+                    either(op(spv::OpFUnordLessThan, boolean, v, zero), op(spv::OpFUnordGreaterThan, boolean, op(spv::OpFAdd, f32, u, v), one))),
+                either(
+                    op(spv::OpFUnordLessThan, boolean, t, zero),
+                    op(spv::OpFOrdEqual, boolean, tDenom, zero)));
             tNum = selectF(missed, real(0x7f800000u), tNum);
             tDenom = selectF(missed, one, tDenom);
             const auto triangleId = d[15];
@@ -3095,8 +3101,16 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
                 const auto packed = d[4u + position / 2u];
                 return EmitF16BitsToF32(state, position % 2u == 0u ? op(spv::OpBitwiseAnd, u32, packed, uint(0xffffu)) : op(spv::OpShiftRightLogical, u32, packed, uint(16u)));
             };
-            const auto nanMax = [&](std::uint32_t a, std::uint32_t b) { return selectF(either(isNan(a), op(spv::OpFOrdGreaterThan, boolean, a, b)), a, b); };
-            const auto nanMin = [&](std::uint32_t a, std::uint32_t b) { return selectF(either(isNan(a), op(spv::OpFOrdLessThan, boolean, a, b)), a, b); };
+            const auto numMax = [&](std::uint32_t a, std::uint32_t b) {
+                const auto id = state.module.AllocateId();
+                state.module.AddFunction(spv::OpExtInst, f32, id, GlslStd450(state), GLSLstd450NMax, a, b);
+                return id;
+            };
+            const auto numMin = [&](std::uint32_t a, std::uint32_t b) {
+                const auto id = state.module.AllocateId();
+                state.module.AddFunction(spv::OpExtInst, f32, id, GlslStd450(state), GLSLstd450NMin, a, b);
+                return id;
+            };
             const auto zero = real(0u);
             const auto growFactor = op(spv::OpFAdd, f32, real(0x3f800000u), op(spv::OpFMul, f32, Unary(state, spv::OpConvertUToF, f32, boxGrow), real(0x33800000u)));
             std::array<std::uint32_t, 4> children{};
@@ -3104,18 +3118,22 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
             for (std::uint32_t child = 0; child < 4u; ++child) {
                 std::uint32_t enter = 0;
                 std::uint32_t leave = 0;
+                std::uint32_t invalidBounds = isNan(extent);
                 for (std::uint32_t axis = 0; axis < 3u; ++axis) {
-                    const auto planeMin = op(spv::OpFMul, f32, op(spv::OpFSub, f32, bound(child, axis), origin[axis]), inverse[axis]);
-                    const auto planeMax = op(spv::OpFMul, f32, op(spv::OpFSub, f32, bound(child, axis + 3u), origin[axis]), inverse[axis]);
+                    const auto bMin = bound(child, axis);
+                    const auto bMax = bound(child, axis + 3u);
+                    invalidBounds = either(invalidBounds, either(either(isNan(bMin), isNan(bMax)), either(isNan(origin[axis]), isNan(inverse[axis]))));
+                    const auto planeMin = op(spv::OpFMul, f32, op(spv::OpFSub, f32, bMin, origin[axis]), inverse[axis]);
+                    const auto planeMax = op(spv::OpFMul, f32, op(spv::OpFSub, f32, bMax, origin[axis]), inverse[axis]);
                     const auto positive = op(spv::OpFOrdGreaterThanEqual, boolean, inverse[axis], zero);
                     const auto near = selectF(positive, planeMin, planeMax);
                     const auto far = selectF(positive, planeMax, planeMin);
-                    enter = axis == 0u ? near : nanMax(enter, near);
-                    leave = axis == 0u ? far : nanMin(leave, far);
+                    enter = axis == 0u ? near : numMax(enter, near);
+                    leave = axis == 0u ? far : numMin(leave, far);
                 }
-                const auto nan = either(isNan(enter), isNan(leave));
-                const auto minT = selectF(nan, real(0x7f800000u), selectF(op(spv::OpFOrdGreaterThan, boolean, enter, zero), enter, zero));
-                const auto maxT = selectF(nan, real(0xff800000u), selectF(op(spv::OpFOrdLessThan, boolean, leave, extent), leave, extent));
+                const auto nan = either(invalidBounds, either(isNan(enter), isNan(leave)));
+                const auto minT = selectF(nan, real(0x7f800000u), numMax(enter, zero));
+                const auto maxT = selectF(nan, real(0xff800000u), numMin(leave, extent));
                 const auto hit = op(spv::OpFOrdLessThanEqual, boolean, minT, op(spv::OpFMul, f32, maxT, growFactor));
                 children[child] = selectU(hit, d[child], invalid);
                 keys[child] = minT;
