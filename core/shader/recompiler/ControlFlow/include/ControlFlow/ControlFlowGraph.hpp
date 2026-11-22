@@ -98,6 +98,13 @@ struct StronglyConnectedComponent {
 };
 
 struct ControlFlowGraph {
+    struct TreeIndex {
+        std::vector<std::uint32_t> tin;
+        std::vector<std::uint32_t> tout;
+        std::vector<std::uint32_t> depth;
+        std::vector<std::uint32_t> parent;
+        bool valid = false;
+    };
     struct CodeTableLoad {
         std::uint32_t programCounter = 0;
         std::vector<std::uint64_t> values;
@@ -106,6 +113,8 @@ struct ControlFlowGraph {
     // XBOX-FORK: while the structurizer splits shared merges, block ids stay stable (blocks[id].id == id) and the layout order
     // lives here (a permutation of block ids). Empty means the order of `blocks` is the layout, as everywhere else.
     std::vector<std::uint32_t> layoutOrder;
+    TreeIndex domTree;
+    TreeIndex pdomTree;
     std::vector<NaturalLoop> naturalLoops;
     std::vector<BackEdge> backEdges;
     std::vector<StronglyConnectedComponent> components;

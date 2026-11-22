@@ -22,8 +22,9 @@ private:
     void detectNaturalLoops(ControlFlowGraph& graph) const;
     void computePostDominators(ControlFlowGraph& graph) const;
     void computeBackEdges(ControlFlowGraph& graph) const;
-    void computeStronglyConnectedComponents(ControlFlowGraph& graph) const;
+    void computeStronglyConnectedComponents(ControlFlowGraph& graph, bool buildComponents = true) const;
     void recomputeAnalyses(ControlFlowGraph& graph) const;
+    void materializeAnalyses(ControlFlowGraph& graph) const;
     void canonicalizeNaturalLoops(ControlFlowGraph& graph, bool routeLeavingExits, bool routeSharedExits) const;
     void splitSharedMergeBlocks(ControlFlowGraph& graph, bool routeLeavingExits, bool routeSharedExits, bool relaxReturnJoins) const;
     void isolateSemanticLoopHeaders(ControlFlowGraph& graph) const;
