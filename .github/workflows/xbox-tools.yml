@@ -1,0 +1,118 @@
+name: Xbox tools
+
+on:
+  pull_request:
+    branches: [xbox-series]
+    paths:
+      - tools/xbox/**
+      - tools/tests/test_xbox_*.py
+      - core/shader/recompiler/**
+      - core/libs/**
+      - 3rdparty/SPIRV-Headers
+      - 3rdparty/Vulkan-Headers
+      - .github/workflows/xbox-tools.yml
+  push:
+    branches: [xbox-series]
+    paths:
+      - tools/xbox/**
+      - tools/tests/test_xbox_*.py
+      - core/shader/recompiler/**
+      - core/libs/**
+      - 3rdparty/SPIRV-Headers
+      - 3rdparty/Vulkan-Headers
+      - .github/workflows/xbox-tools.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xbox-tools-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      XBOX_RDNA2: llvm
+      XBOX_EXEC: ${{ github.workspace }}/build-xbox/exec
+      XBOX_NO_FRAGMENT_BARY: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git submodule update --init --depth 1 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
+      - name: Install the build tools, lavapipe, glslang and LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build libvulkan-dev mesa-vulkan-drivers llvm glslang-tools
+          llvm-mc --version
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+      - run: cmake -S tools/xbox -B build-xbox -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-xbox
+      - name: Python tool tests
+        run: |
+          for test in tools/tests/test_xbox_*.py; do
+            echo "== $test"
+            python3 "$test"
+          done
+      # lavapipe reports maxSubgroupSize 8. The compute execution tests need
+      # 32/64-wide subgroups and quad_test needs 32-lane quad operations, so
+      # those stay a manual/GPU run. per_vertex_test needs
+      # VK_KHR_fragment_shader_barycentric.
+      - name: Graphics tests lavapipe supports
+        run: |
+          for test in pixel_smoke interpolation_test texture_test; do
+            echo "== $test"
+            python3 "tools/xbox/$test.py" --exec build-xbox/exec
+          done
+          python3 tools/xbox/texture_test.py --exec build-xbox/exec --bilinear
+          python3 tools/xbox/gs_test.py --exec build-xbox/exec
+          python3 tools/xbox/vs_test.py --exec build-xbox/exec
+      - name: Pipeline capability guards
+        run: python3 -I tools/xbox/pipeline_capability_test.py --exec "$XBOX_EXEC"
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VULKAN_LOADER_TAG: v1.4.335
+      VULKAN_DEF_SHA256: 9ba339b7f5ee2df28487698a6840ecf095fac58b415c2c89ad9f161e9d316378
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git submodule update --init --depth 1 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
+      - name: Assemble a minimal Vulkan SDK from Vulkan-Headers and the loader export list
+        run: |
+          $sdk = Join-Path $env:RUNNER_TEMP vulkan-sdk
+          New-Item -ItemType Directory -Force "$sdk/Include", "$sdk/Lib" | Out-Null
+          Copy-Item -Recurse 3rdparty/Vulkan-Headers/include/* "$sdk/Include"
+          $def = Join-Path $env:RUNNER_TEMP vulkan-1.def
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Loader/$env:VULKAN_LOADER_TAG/loader/vulkan-1.def" -OutFile $def
+          if ((Get-FileHash -Algorithm SHA256 $def).Hash -ne $env:VULKAN_DEF_SHA256) { throw "vulkan-1.def checksum mismatch" }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $lib = & $vswhere -latest -products '*' -find "VC/Tools/MSVC/**/bin/Hostx64/x64/lib.exe" | Select-Object -First 1
+          & $lib /nologo /machine:x64 "/def:$def" "/out:$sdk/Lib/vulkan-1.lib"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "VULKAN_SDK=$sdk" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - run: python tools/xbox/build_msvc.py --with-exec --jobs 4
+      - name: Python tests that do not need llvm-mc
+        run: |
+          python tools/tests/test_xbox_rdna2_recomp.py
+          python tools/tests/test_xbox_xgr_idl_table.py
+          python tools/tests/test_xbox_progress_svg.py
+      - name: Check out the Xodus xgameruntime IDLs (LGPL; read at build time, not committed)
+        uses: actions/checkout@v7
+        with:
+          repository: xodus-gaming/xgameruntime
+          ref: 642e41c7617310c5d1b39d4e525b01ecae261f9e
+          path: xodus-xgameruntime
+          persist-credentials: false
+      - name: xgameruntime stand-in tests (MSVC)
+        run: python tools/xbox/platform/xgr/run_tests.py xodus-xgameruntime/include --out build-xgr
