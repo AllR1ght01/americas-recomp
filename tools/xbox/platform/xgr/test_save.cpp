@@ -42,6 +42,7 @@ constexpr HRESULT kQuotaExceeded = static_cast<HRESULT>(0x80830006);
 constexpr HRESULT kBufferTooSmall = static_cast<HRESULT>(0x80830007);
 constexpr HRESULT kBlobNotFound = static_cast<HRESULT>(0x80830008);
 constexpr HRESULT kNoServiceConfiguration = static_cast<HRESULT>(0x80830009);
+constexpr HRESULT kHandleExpired = static_cast<HRESULT>(0x8083000D);
 constexpr HRESULT kProviderMismatch = static_cast<HRESULT>(0x8083000F);
 constexpr int64_t kQuota = 256ll * 1024 * 1024;
 constexpr size_t kMaxBlob = 16u * 1024 * 1024;
@@ -321,8 +322,9 @@ void test_basic(void* provider) {
   check_hr(g_save.call<HRESULT>(slot::SubmitBlobWrite, u, "nullData", static_cast<const uint8_t*>(nullptr), static_cast<size_t>(4)), E_INVALIDARG,
            "SubmitBlobWrite null data rejected");
   check_hr(submit(u), S_OK, "SubmitUpdate");
-  check_hr(submit(u), E_ILLEGAL_METHOD_CALL, "SubmitUpdate twice rejected");
-  check_hr(write_blob(u, "Late", "x"), E_ILLEGAL_METHOD_CALL, "SubmitBlobWrite after submit rejected");
+  check_hr(submit(u), kHandleExpired, "SubmitUpdate twice rejected");
+  check_hr(write_blob(u, "Late", "x"), kHandleExpired, "SubmitBlobWrite after submit rejected");
+  check_hr(delete_blob(u, "Late"), kHandleExpired, "SubmitBlobDelete after submit rejected");
   close_update(u);
   check_hr(write_blob(u, "Late", "x"), E_INVALIDARG, "closed update handle rejected");
 
@@ -392,6 +394,9 @@ void test_basic(void* provider) {
   delete_blob(u2, "PlayerState");
   AsyncBlock sb{};
   check_hr(g_save.call<HRESULT>(slot::SubmitUpdateAsync, u2, &sb), S_OK, "SubmitUpdateAsync");
+  AsyncBlock again{};
+  check_hr(g_save.call<HRESULT>(slot::SubmitUpdateAsync, u2, &again), kHandleExpired, "SubmitUpdateAsync twice rejected");
+  check_hr(submit(u2), kHandleExpired, "SubmitUpdate after SubmitUpdateAsync rejected");
   close_update(u2);
   check_hr(wait(&sb), S_OK, "SubmitUpdateAsync completes after the handle was closed");
   check_hr(g_save.call<HRESULT>(slot::SubmitUpdateResult, &sb), S_OK, "SubmitUpdateResult");

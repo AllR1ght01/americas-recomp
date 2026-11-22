@@ -31,6 +31,7 @@ constexpr HRESULT kGsQuotaExceeded = static_cast<HRESULT>(0x80830006);
 constexpr HRESULT kGsProvidedBufferTooSmall = static_cast<HRESULT>(0x80830007);
 constexpr HRESULT kGsBlobNotFound = static_cast<HRESULT>(0x80830008);
 constexpr HRESULT kGsNoServiceConfiguration = static_cast<HRESULT>(0x80830009);
+constexpr HRESULT kGsHandleExpired = static_cast<HRESULT>(0x8083000D);
 constexpr HRESULT kGsProviderMismatch = static_cast<HRESULT>(0x8083000F);
 
 constexpr size_t kMaxContainerNameSize = 256;
@@ -971,7 +972,7 @@ HRESULT add_operation(void* update, const char* blobName, std::optional<std::vec
   auto u = lookup<UpdateObject>(Kind::Update, update);
   if (!u || !valid_blob_name(blobName)) return E_INVALIDARG;
   std::lock_guard<std::mutex> guard(u->lock);
-  if (u->submitted) return E_ILLEGAL_METHOD_CALL;
+  if (u->submitted) return kGsHandleExpired;
   if (u->ops.count(blobName)) return E_INVALIDARG;
   if (data) u->bytes += data->size();
   u->ops.emplace(blobName, std::move(data));
@@ -1002,7 +1003,7 @@ HRESULT take_update(void* update, SubmitJob* job) {
   auto u = lookup<UpdateObject>(Kind::Update, update);
   if (!u) return E_INVALIDARG;
   std::lock_guard<std::mutex> guard(u->lock);
-  if (u->submitted) return E_ILLEGAL_METHOD_CALL;
+  if (u->submitted) return kGsHandleExpired;
   u->submitted = true;
   job->store = u->store;
   job->container = u->container;
