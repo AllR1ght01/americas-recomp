@@ -14,8 +14,6 @@
 //               address does not fit in 48 bits, as RADV hands out)
 //   stage ps   (a pixel shader instead of a compute shader: draws one triangle that covers the whole target; the vertex shader
 //               comes from `vs <spv>` and writes constant interpolants; colour outputs are read back as out/target<i>.bin, RGBA32F)
-//   stage vs   (a vertex shader: draws one triangle of three vertices; the fragment shader comes from `fs <spv>` and reads the
-//               shader's parameter exports by location)
 //   export <target> <mode> <mapping>   (SPI_SHADER_COL_FORMAT-style output mode, default 4 = FP16_ABGR; mapping default 0xe4 = identity)
 //   depth   (a D32_SFLOAT depth attachment, test ALWAYS + write; read back as out/depth.bin, cleared to 0.123456)
 //   target <w> <h>    inputaddr <hex>    interp <count> <fp16 attribute mask hex>
