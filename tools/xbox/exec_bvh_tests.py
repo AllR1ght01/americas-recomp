@@ -41,15 +41,22 @@ def slab(origin, inv, extent, lo, hi, grow=0):
         leave = far if leave is None else min(leave, far)
     min_t = max(enter, 0.0)
     max_t = min(leave, extent)
-    return (min_t <= max_t * (1.0 + grow * 2.0 ** -23)), min_t
+    return (min_t <= max_t * (1.0 + grow * 2.0 ** -23)), min_t, max_t
 
-def ref_box(children, boxes, origin, direction, extent, sort):
+def ref_box(children, boxes, origin, direction, extent, sort, heuristic=0):
     inv = inv_dir(direction)
     hits = [slab(origin, inv, extent, lo, hi) for lo, hi in boxes]
-    ids = [c if h else INVALID for c, (h, _) in zip(children, hits)]
-    if not sort:
+    ids = [c if h else INVALID for c, (h, _, _) in zip(children, hits)]
+    if not sort or heuristic == 3:
         return ids
-    order = sorted(range(4), key=lambda i: (ids[i] == INVALID, hits[i][1]))
+    def key(i):
+        _, min_t, max_t = hits[i]
+        if heuristic == 1:
+            return min_t - max_t
+        if heuristic == 2:
+            return min_t + max_t
+        return min_t
+    order = sorted(range(4), key=lambda i: (ids[i] == INVALID, key(i)))
     return [ids[i] for i in order]
 
 def ref_triangle(v0, v1, v2, origin, direction):
@@ -72,7 +79,7 @@ def box16_node(children, boxes):
     d += [halves[i] | (halves[i + 1] << 16) for i in range(0, len(halves), 2)]
     return struct.pack('<16I', *d)
 
-def run_query(bvh_bytes, node, origin, direction, extent, sort=False, grow=0, node64=False, a16=False, barycentrics=False, inv=None):
+def run_query(bvh_bytes, node, origin, direction, extent, sort=False, grow=0, node64=False, a16=False, barycentrics=False, inv=None, heuristic=0):
     """one ray; returns the four result dwords of lane 0"""
     p = rdna_asm.Program()
     p.smem('s_load_dwordx4', 8, 4, 0)
@@ -93,7 +100,7 @@ def run_query(bvh_bytes, node, origin, direction, extent, sort=False, grow=0, no
     p.mubuf('buffer_store_dwordx4', 4, 1, 8, 128, 0)
     p.sopp('s_endpgm')
     pokes = T.vsharp(0, 0, 1, 1024) + [
-        "ptr8lo 0 16 2", f"ptr8hi 0 20 2 {(grow << 23) | ((1 << 31) if sort else 0)}",
+        "ptr8lo 0 16 2", f"ptr8hi 0 20 2 {((heuristic & 3) << 21) | (grow << 23) | ((1 << 31) if sort else 0)}",
         "poke 0 24 0xffffffff", f"poke 0 28 {0x3ff | ((1 << 24) if barycentrics else 0) | (0xb << 28)}"]
     r = T.run(p.bytes(), {0: (256, None), 1: (1024, None), 2: (len(bvh_bytes), bvh_bytes)}, pokes)
     return struct.unpack('<4I', r[1][:16])
@@ -660,7 +667,76 @@ def test_multilevel_rehydrated_bvh_traversal_unsorted():
 def test_multilevel_rehydrated_bvh64_traversal_lowguest():
     _run_traversal_test(sort=True, node64=True, lowguest=True)
 
-TESTS = [test_box32_low_guest_addresses, test_box16_unsorted, test_box16_sorted, test_box32_node64, test_box32_a16, test_box16_node64_a16, test_triangle_node64_a16, test_box32_unsorted, test_box32_sorted, test_box32_extent_clips, test_triangle_hit, test_triangle_miss, test_box32_axis_aligned_ray_on_face, test_box16_axis_aligned_ray_on_flat_box, test_triangle_nan_and_parallel_miss, test_multilevel_rehydrated_bvh_traversal_sorted, test_multilevel_rehydrated_bvh_traversal_unsorted, test_multilevel_rehydrated_bvh64_traversal_lowguest]
+def test_box_sort_heuristics():
+    boxes = [
+        ((0.5, 0.0, 0.0), (10.5, 1.0, 1.0)),
+        ((1.0, 0.0, 0.0), (1.5, 1.0, 1.0)),
+        ((2.0, 0.0, 0.0), (8.0, 1.0, 1.0)),
+        ((1.5, 0.0, 0.0), (3.5, 1.0, 1.0)),
+    ]
+    node = box32_node(CHILDREN, boxes)
+    origin, direction = (0.0, 0.5, 0.5), (1.0, 0.0, 0.0)
+    expected = {
+        0: [CHILDREN[0], CHILDREN[1], CHILDREN[3], CHILDREN[2]],
+        1: [CHILDREN[0], CHILDREN[2], CHILDREN[3], CHILDREN[1]],
+        2: [CHILDREN[1], CHILDREN[3], CHILDREN[2], CHILDREN[0]],
+        3: [CHILDREN[0], CHILDREN[1], CHILDREN[2], CHILDREN[3]],
+    }
+    for heuristic, want in expected.items():
+        got = list(run_query(node, node_id(0, bvh.NODE_TYPE_BOX32), origin, direction, 20.0, sort=True, heuristic=heuristic))
+        ref = ref_box(CHILDREN, boxes, origin, direction, 20.0, sort=True, heuristic=heuristic)
+        assert got == want and ref == want, (heuristic, list(map(hex, got)), list(map(hex, want)))
+
+def test_triangle_barycentrics_tri0_tri1_and_backface():
+    quad_verts = [(0.0, 0.0, 5.0), (2.0, 0.0, 5.0), (0.0, 2.0, 5.0), (2.0, 2.0, 5.0)]
+    vb = b"".join(struct.pack("<3f", *v) for v in quad_verts)
+    configs = [
+        (0x94, (0, 1, 2), (2, 3, 0)),
+        (0x49, (0, 1, 2), (2, 1, 3)),
+        (0x22, (0, 1, 2), (3, 1, 0)),
+    ]
+    for vorder, tri0_idx, tri1_idx in configs:
+        ib = struct.pack("<6H", *(tri0_idx + tri1_idx))
+        geom = bvh.TriangleGeometryDesc(
+            vertex_buffer=vb, vertex_stride=12,
+            index_buffer=ib, index_format=bvh.INDEX_FORMAT_R16_UINT,
+        )
+        leaf_off = 0x80
+        total = 0x100
+        src = bytearray(total)
+        flags = bvh.BVH_FLAG_BLAS | bvh.BVH_FLAG_COMPRESSED | 0x20006
+        src[:64] = struct.pack(
+            "<4I6f6I",
+            flags, (total >> 6) - 1, 0x13572468, 1,
+            0.0, 0.0, 5.0, 2.0, 2.0, 5.0,
+            0xC0, 0, node_id(leaf_off, bvh.NODE_TYPE_TRI0), leaf_off, 0x40, bvh.DEFAULT_TRANSFORM_WORD,
+        )
+        chunk = _pack_leaf_chunk([(0, 0x81, 0, 1, vorder)])
+        src[leaf_off : leaf_off + len(chunk)] = chunk
+        dst = bytearray(total)
+        bvh.rehydrate_leaves(bytes(src), dst, [geom])
+        for ntype, idxs in (
+            (bvh.NODE_TYPE_TRI0, tri0_idx),
+            (bvh.NODE_TYPE_TRI1, tri1_idx),
+        ):
+            v0, v1, v2 = (quad_verts[k] for k in idxs)
+            px = 0.2 * v0[0] + 0.5 * v1[0] + 0.3 * v2[0]
+            py = 0.2 * v0[1] + 0.5 * v1[1] + 0.3 * v2[1]
+            for origin, direction in (
+                ((px, py, 0.0), (0.0, 0.0, 1.0)),
+                ((px, py, 10.0), (0.0, 0.0, -1.0)),
+            ):
+                want = ref_scene_trace([(0, v0, v1, v2)], origin, direction, 100.0)
+                assert want is not None
+                got = run_query(bytes(dst), node_id(leaf_off, ntype), origin, direction, 100.0, barycentrics=True)
+                t_num, t_denom, u_num, v_num = struct.unpack("<4f", struct.pack("<4I", *got))
+                t_got, u_got, v_got = t_num / t_denom, u_num / t_denom, v_num / t_denom
+                assert abs(t_got - want[1]) < 1e-5, (hex(vorder), ntype, origin, t_got, want[1])
+                assert abs(u_got - want[2]) < 1e-5, (hex(vorder), ntype, origin, u_got, want[2])
+                assert abs(v_got - want[3]) < 1e-5, (hex(vorder), ntype, origin, v_got, want[3])
+                assert (t_denom > 0.0) == want[4], (hex(vorder), ntype, origin, t_denom, want[4])
+
+TESTS = [test_box32_low_guest_addresses, test_box16_unsorted, test_box16_sorted, test_box32_node64, test_box32_a16, test_box16_node64_a16, test_triangle_node64_a16, test_box32_unsorted, test_box32_sorted, test_box32_extent_clips, test_triangle_hit, test_triangle_miss, test_box32_axis_aligned_ray_on_face, test_box16_axis_aligned_ray_on_flat_box, test_triangle_nan_and_parallel_miss, test_multilevel_rehydrated_bvh_traversal_sorted, test_multilevel_rehydrated_bvh_traversal_unsorted, test_multilevel_rehydrated_bvh64_traversal_lowguest, test_box_sort_heuristics, test_triangle_barycentrics_tri0_tri1_and_backface]
 
 if __name__ == "__main__":
     bad = 0

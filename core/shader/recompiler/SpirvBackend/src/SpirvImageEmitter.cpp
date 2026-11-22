@@ -2988,7 +2988,10 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
         const auto baseUnits = pair(word[0], op(spv::OpBitwiseAnd, u32, word[1], uint(0xffu)));
         const auto lastNode = pair(word[2], op(spv::OpBitwiseAnd, u32, word[3], uint(0x3ffu)));
         const auto boxGrow = op(spv::OpBitwiseAnd, u32, op(spv::OpShiftRightLogical, u32, word[1], uint(23u)), uint(0xffu));
-        const auto boxSort = op(spv::OpINotEqual, boolean, op(spv::OpBitwiseAnd, u32, word[1], uint(0x80000000u)), uint(0u));
+        const auto boxSortHeuristic = op(spv::OpBitwiseAnd, u32, op(spv::OpShiftRightLogical, u32, word[1], uint(21u)), uint(3u));
+        const auto boxSort = both(
+            op(spv::OpINotEqual, boolean, op(spv::OpBitwiseAnd, u32, word[1], uint(0x80000000u)), uint(0u)),
+            op(spv::OpINotEqual, boolean, boxSortHeuristic, uint(3u)));
         const auto barycentrics = op(spv::OpINotEqual, boolean, op(spv::OpBitwiseAnd, u32, word[3], uint(1u << 24u)), uint(0u));
         const auto nodeAddress = op(spv::OpIAdd, u64, op(spv::OpShiftLeftLogical, u64, baseUnits, BdaConstant(state, 8u)), op(spv::OpShiftLeftLogical, u64, op(spv::OpBitwiseAnd, u64, node, BdaConstant(state, ~std::uint64_t{7u})), BdaConstant(state, 3u)));
         const auto within = [&](spv::Op compare) {
@@ -3131,6 +3134,8 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
             };
             const auto zero = real(0u);
             const auto growFactor = op(spv::OpFAdd, f32, real(0x3f800000u), op(spv::OpFMul, f32, Unary(state, spv::OpConvertUToF, f32, boxGrow), real(0x33800000u)));
+            const auto sortLargest = op(spv::OpIEqual, boolean, boxSortHeuristic, uint(1u));
+            const auto sortMidpoint = op(spv::OpIEqual, boolean, boxSortHeuristic, uint(2u));
             std::array<std::uint32_t, 4> children{};
             std::array<std::uint32_t, 4> keys{};
             for (std::uint32_t child = 0; child < 4u; ++child) {
@@ -3154,7 +3159,9 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
                 const auto maxT = selectF(nan, real(0xff800000u), numMin(leave, extent));
                 const auto hit = op(spv::OpFOrdLessThanEqual, boolean, minT, op(spv::OpFMul, f32, maxT, growFactor));
                 children[child] = selectU(hit, d[child], invalid);
-                keys[child] = minT;
+                const auto largestKey = op(spv::OpFSub, f32, minT, maxT);
+                const auto midpointKey = op(spv::OpFAdd, f32, minT, maxT);
+                keys[child] = selectF(sortLargest, largestKey, selectF(sortMidpoint, midpointKey, minT));
             }
             auto sorted = children;
             for (const auto [a, b] : std::array<std::pair<std::uint32_t, std::uint32_t>, 5>{{{0, 2}, {1, 3}, {0, 1}, {2, 3}, {1, 2}}}) {
