@@ -202,6 +202,12 @@ def main():
             "%s already holds carved output; pass --force to replace it"
             % arguments.out
         )
+    for path in managed:
+        if os.path.isdir(path) and not os.path.islink(path):
+            parser.error("carved output path is a directory: %s" % path)
+    if os.path.isdir(manifest):
+        parser.error("manifest path is a directory: %s" % manifest)
+
     with open(arguments.archive, "rb") as handle, mmap.mmap(
         handle.fileno(), 0, access=mmap.ACCESS_READ
     ) as archive:
