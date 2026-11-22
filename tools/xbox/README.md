@@ -14,7 +14,20 @@ Experimental tooling for running Xbox Series shader code through the shader reco
    picks the GPU. `rdna2_recomp.py` has rdna2.py's whole interface (`decode`, `sweep` with instruction words and formats), so `cpu_ref.py`
    falls back to it as well; its instruction lengths and opcodes follow the recompiler's decoder.
    The same commands build on macOS against MoltenVK (Homebrew `molten-vk`, `vulkan-loader`); `exec` enables portability enumeration
-   and `VK_KHR_portability_subset` when they are offered. A device that cannot pin the compute subgroup size (MoltenVK) gets SPIR-V 1.5
+   and `VK_KHR_portability_subset` when they are offered.
+
+   On macOS, `exec` searches for the Vulkan loader using configured runpaths and the standard Homebrew
+   library directories (`/opt/homebrew/lib` on Apple Silicon and `/usr/local/lib` on Intel Macs).
+   For custom Vulkan SDK installations, set `DYLD_LIBRARY_PATH` to the SDK's absolute library directory
+   (where dyld permits it).
+
+   Verify the installation from the repository root:
+
+   ```sh
+   python3 tools/xbox/exec_smoke.py --exec build-xbox/exec
+   ```
+
+   A device that cannot pin the compute subgroup size (MoltenVK) gets SPIR-V 1.5
    without a required size, so the subgroup size is the device's fixed `subgroupSize`; wave64 then runs as two 32-wide halves as on
    other 32-wide devices. MoltenVK reports `fragmentShaderBarycentric` but MSL has no `PerVertexKHR`: run pixel tests with
    `XBOX_NO_FRAGMENT_BARY=1`.
