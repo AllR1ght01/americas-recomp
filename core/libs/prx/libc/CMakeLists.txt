@@ -304,6 +304,9 @@ target_include_directories(libc PRIVATE
 )
 
 target_link_libraries(libc PRIVATE zarchive)
+if(WIN32)
+    target_compile_definitions(libc PRIVATE _CRT_RAND_S)
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(libc PRIVATE -ffp-contract=off $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-slp-vectorize>)
