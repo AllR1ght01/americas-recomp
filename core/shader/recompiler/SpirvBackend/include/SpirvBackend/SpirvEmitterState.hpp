@@ -312,11 +312,15 @@ struct SpirvEmitterState {
 
 class SpirvDefinitionTable {
 public:
+    using Journal = std::unordered_map<const IrValue*, std::optional<std::uint32_t>>;
+
     [[nodiscard]] const std::uint32_t* Find(const IrValue* value) const {
         const std::uint32_t id = value->Id();
         if (id < slots.size() && slots[id].key == value) return &slots[id].id;
         if (const auto found = overflow.find(value); found != overflow.end()) return &found->second;
-        return nullptr;
+        if (base == nullptr || hidden.contains(value)) return nullptr;
+        if (const auto changed = baseJournal->find(value); changed != baseJournal->end()) return changed->second ? &*changed->second : nullptr;
+        return base->Find(value);
     }
 
     [[nodiscard]] bool Contains(const IrValue* value) const {
@@ -325,6 +329,12 @@ public:
 
     void Emplace(const IrValue* value, std::uint32_t id) {
         if (Find(value) != nullptr) return;
+        Record(value);
+        hidden.erase(value);
+        if (base != nullptr) {
+            overflow.emplace(value, id);
+            return;
+        }
         const std::uint32_t index = value->Id();
         if (index >= slots.size()) slots.resize(std::max<std::size_t>(std::size_t{index} + 1u, slots.size() * 2u));
         if (slots[index].key == nullptr) {
@@ -335,6 +345,8 @@ public:
     }
 
     void Erase(const IrValue* value) {
+        Record(value);
+        if (base != nullptr && Find(value) != nullptr) hidden.insert(value);
         const std::uint32_t index = value->Id();
         if (index < slots.size() && slots[index].key == value) {
             slots[index] = Slot{};
@@ -343,7 +355,26 @@ public:
         overflow.erase(value);
     }
 
+    void StartJournal(Journal& journal) {
+        this->journal = &journal;
+    }
+
+    void StopJournal() {
+        journal = nullptr;
+    }
+
+    void Overlay(const SpirvDefinitionTable& table, const Journal& changed) {
+        base = &table;
+        baseJournal = &changed;
+    }
+
 private:
+    void Record(const IrValue* value) {
+        if (journal == nullptr || journal->contains(value)) return;
+        const auto* current = Find(value);
+        journal->emplace(value, current != nullptr ? std::optional<std::uint32_t>(*current) : std::nullopt);
+    }
+
     struct Slot {
         const IrValue* key = nullptr;
         std::uint32_t id = 0;
@@ -351,6 +382,10 @@ private:
 
     std::vector<Slot> slots;
     std::unordered_map<const IrValue*, std::uint32_t> overflow;
+    Journal* journal = nullptr;
+    const SpirvDefinitionTable* base = nullptr;
+    const Journal* baseJournal = nullptr;
+    std::unordered_set<const IrValue*> hidden;
 };
 
 struct SpirvValueEmitContext {

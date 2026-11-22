@@ -1027,7 +1027,17 @@ bool EmitNanRegion(SpirvValueEmitContext& ctx, const std::vector<const IrValue*>
         members.erase(region[first++]);
     }
     const auto suffix = std::span(region).subspan(first);
-    auto exact = ctx;
+    SpirvDefinitionTable::Journal changed;
+    SpirvValueEmitContext exact(ctx.state);
+    exact.scratchU32Variable = ctx.scratchU32Variable;
+    exact.otherHalf = ctx.otherHalf;
+    exact.half = ctx.half;
+    exact.definitions.Overlay(ctx.definitions, changed);
+    ctx.definitions.StartJournal(changed);
+    struct StopJournal {
+        SpirvDefinitionTable& table;
+        ~StopJournal() { table.StopJournal(); }
+    } stopJournal{ctx.definitions};
     auto& state = ctx.state;
     const auto exceptional = state.module.AllocateId();
     const auto merge = state.module.AllocateId();
