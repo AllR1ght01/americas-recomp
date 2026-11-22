@@ -214,6 +214,16 @@ Stable block ids (second step): while splitting shared merges, block ids no long
 
 What is left: `recomputeAnalyses` (dominators, post-dominators, SCC from scratch after every split) is now about 34 of the 41 s on the slowest shader. Making it incremental is the next step.
 
+## Compile time: NaN regions and the goto-Phi refiner
+
+Compute 23206 and 23207 (3,700 blocks, 27,500 after structurizing) take about 160 s, over the 120 s limit. Timing each pass of 23206: SPIR-V emission 51 s, `GotoPhiRefiner` 67 s, SSA construction 22 s, folding and resource tracking 7 s each. Both slow passes had a fixed cost per small unit of work, and neither change alters the SPIR-V.
+- **NaN regions** (`EmitNanRegion`, `SpirvFlowEmitter.cpp`). Each region emits its exact path through a copy of the whole emit context, whose definition table has a slot per IR value. For 660 regions those copies were 42 of the 51 s, and freeing them most of the rest. The exact path now reads through an overlay of the live table (`SpirvDefinitionTable::Overlay`). From the point where the copy was made, the live table journals the first change of each value (`StartJournal`), so the overlay sees what the copy saw. Every `Def` and id allocation happens in the same order. Emission: 51 s to 2.3 s.
+- **`GotoPhiRefiner`.** It ran its whole analysis again for every round, but a round only replaces non-Bool operands of non-Phi instructions. The order, dominators, facts and reachability depend on none of those, so they are now computed once. The per-round memos are still cleared, because a memo entry can depend on the recursion depth it was first computed at. Facts keep their condition's block index, reachability walks use precomputed successor indices (41,243 walks per round: 11.9 s to 1.1 s), and the memos are hash maps. Refiner: 67 s to 21 s, with identical work counts.
+
+23206 goes from 161 s to 65 s, with byte-identical SPIR-V. On 9,924 shaders (all compute and vertex, 2,500 random pixel and 2,500 random mesh; 12,424 jobs), the 12,398 SPIR-V files both builds write are byte-identical. The total compile time is 35,828 to 17,209 job-seconds, and no job is slower by more than 0.2 s. With 20 workers, the whole corpus now runs in 1,888 s (the previous full run took 3,132 s). Statuses are unchanged under that load: 23206, 23207 and four other compute shaders still exceed 120 s when 20 compiles share the machine. Alone, 23206 takes 82 s, 23207 76 s and 23210 56 s; 23210 had been just over the limit.
+
+What is left is SSA construction. `SsaBuilder` seals every block only after visiting all of them, so on 23206 every read in a block without its own definition goes through a placeholder Phi: 12.4 million Phis created and 12.36 million removed as trivial (13.9 s, and more under parallel load). Sealing a block once its predecessors are filled would avoid that, but it changes the Phi structure, so it needs its own validity and execution check.
+
 ## Descriptor Phis (third pass)
 
 Of the 157 compute shaders that threw in the first full run, 139 still failed after the second pass. Two changes in `ResourceTracker.cpp` fix 45 of them, with no regression on 559 re-run shaders (all 157 plus every sixth previously valid one):
