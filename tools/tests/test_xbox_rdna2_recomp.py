@@ -68,9 +68,12 @@ class Rdna2RecompTest(unittest.TestCase):
         self.assertEqual([i.name for i in insts], ["s_nop", "s_endpgm"])
         self.assertEqual(bad, [4])
 
-    def test_truncated_instruction_is_not_decoded(self):
-        insts, bad = self.r.sweep(struct.pack("<I", 0x7E0202FF), 0, 4)
-        self.assertEqual((insts, bad), ([], [0]))
+    def test_decode_incomplete_smem_instruction(self):
+        blob = struct.pack("<I", 0xF4000000)
+        inst = self.r.decode(blob, 0)
+
+        self.assertEqual((inst.fmt, inst.name), ("UNKNOWN", "unknown"))
+        self.assertEqual(inst.words, [0xF4000000])
 
     def test_names_are_unique_per_table(self):
         for fmt in ("SOP1", "SOP2", "SOPK", "SOPC", "SOPP", "SMEM", "VOP1", "VOP2", "VOPC", "VOP3", "VOP3P", "VINTRP", "DS", "MUBUF",
