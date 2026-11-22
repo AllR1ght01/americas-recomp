@@ -240,6 +240,10 @@ denormal-flush rows `+tiny * 1 + -0` and `-tiny * 1 + -0`, and the zero rule
 twice. By default the discriminator rows must equal `v_fma_f32` (`3A000400`,
 `7F7FFFFF`); with `XBOX_NO_FUSED_LEGACY_MAD=1` the product is rounded first
 (`3A000000`, `7F800000`). The flush rows give +0 and the zero-rule row 1.0 either way.
+The operands are loaded from the output buffer, which the test initialises, not moved in as
+literals: an `Fma` whose three operands are constants is folded by Intel's Windows driver
+(101.6127) as a rounded multiply then an add, and the test would measure that folder
+instead of the GPU.
 
 ### Test v_permlane16 and v_permlanex16
 
