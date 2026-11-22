@@ -42,8 +42,8 @@ How to use all of it once the game executable is available: [`tools/xbox/platfor
 
 - **Pixel (3):** the last three shaders that throw. The classes this section used to list are gone in the 2026-11-22 rerun: no shader needs the barycentric extension or the f16 opt-in to validate, and the descriptor and sampler chains, the barycentric location limit and the clamped sampling all compile strict.
 - **Vertex (788):** computed `s_swappc` targets and fetch-shader calls with no parsed plan. Vertex layout comes from pipeline state, so most of these wait for the executable.
-- **Mesh (42):** 37 are per-lane sampler webs, of which one open PR covers 36; the other five (10264, 10267, 10268, 10451, 10452) compile at wave 32 and only throw at wave 64, a wave-size effect rather than a recompiler regression (`XBOX_WAVE=32` reproduces the old harness).
-- **Compute (10):** 6 time out and 4 throw.
+- **Mesh (42):** 37 are per-lane sampler webs, of which one open PR covers 36; the other five (10264, 10267, 10268, 10451, 10452) are wave 64 by their own headers and their sampler descriptor chain cannot be resolved at that wave size. That is a real limitation of the recompiler, not a harness artefact: they only compiled when they were wrongly run as wave 32.
+- **Compute (11):** 7 time out and 4 throw.
 - **Everything the executable decides:** formats, blend and depth state, export mapping, descriptor contents. The harness uses defaults. No frame has been rendered.
 - **Ray tracing:** 62 of 64 shaders that use the hardware BVH instruction recompile, but nothing was traversed. The 8.3 GB BVH dump's bit layout is not decoded ([`BVH_CONTAINER.md`](docs/xbox/BVH_CONTAINER.md)).
 
