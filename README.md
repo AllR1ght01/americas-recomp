@@ -57,6 +57,10 @@ How to use all of it once the game executable is available: [`tools/xbox/platfor
 - [`docs/xbox/PLATFORM_SURFACE.md`](docs/xbox/PLATFORM_SURFACE.md): platform findings, lowering and dispatch results.
 - [`tools/xbox`](tools/xbox): driver, runners, binding analysis, header decoder, platform tooling.
 
+## Contributing to the Xbox work
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and claim an item before starting. The coordination issue [#42](https://github.com/realdody/americas-recomp/issues/42) has the claim commands and current work; the recompiler failure classes are in [#59](https://github.com/realdody/americas-recomp/issues/59) and the `xgameruntime.dll` stand-in interfaces in [#58](https://github.com/realdody/americas-recomp/issues/58). GPU and driver results go in [#47](https://github.com/realdody/americas-recomp/issues/47).
+
 Not included in this repo: shader dumps and any game files.
 
 ## Mention: AnyPS5
