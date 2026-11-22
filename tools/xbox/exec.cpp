@@ -306,7 +306,7 @@ int main(int argc, char** argv) {
     try {
         std::uint32_t wave = 32;
         std::uint32_t groups[3] = {1, 1, 1};
-        bool lowGuest = false, pixel = false, geometry = false, hasDepth = false;
+        bool lowGuest = false, pixel = false, geometry = false, vertex = false, hasDepth = false;
         std::uint32_t targetW = 8, targetH = 8, inputAddr = 2, interpCount = 0, fp16Mask = 0;
         std::uint32_t geomInputPrimitive = 3, geomOutputTopology = 3, geomMaxOutputVertices = 3;
         std::uint32_t geomEsgsItemSize = 8, geomGsvsVertexSize = 8, geomInputAttributes = 1, geomOutputAttributes = 1;
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
             else if (l.w[0] == "groups") for (int i = 0; i < 3; ++i) groups[i] = static_cast<std::uint32_t>(Num(l.w[1 + i]));
             else if (l.w[0] == "code") codePath = l.w[1];
             else if (l.w[0] == "lowguest") lowGuest = true;
-            else if (l.w[0] == "stage") { pixel = l.w[1] == "ps"; geometry = l.w[1] == "gs"; }
+            else if (l.w[0] == "stage") { pixel = l.w[1] == "ps"; geometry = l.w[1] == "gs"; vertex = l.w[1] == "vs"; }
             else if (l.w[0] == "target") { targetW = static_cast<std::uint32_t>(Num(l.w[1])); targetH = static_cast<std::uint32_t>(Num(l.w[2])); }
             else if (l.w[0] == "inputaddr") inputAddr = static_cast<std::uint32_t>(std::stoul(l.w[1], nullptr, 16));
             else if (l.w[0] == "interp") { interpCount = static_cast<std::uint32_t>(Num(l.w[1])); fp16Mask = static_cast<std::uint32_t>(std::stoul(l.w[2], nullptr, 16)); }
@@ -356,7 +356,7 @@ int main(int argc, char** argv) {
             else if (l.w[0] == "userdwords") userCount = static_cast<std::uint32_t>(Num(l.w[1]));
             else if (l.w[0] == "out") outDir = l.w[1];
         }
-        const bool graphics = pixel || geometry;
+        const bool graphics = pixel || geometry || vertex;
         if (geometry && userCount == 16) userCount = 40;
         const bool bary = pixel && !std::getenv("XBOX_NO_FRAGMENT_BARY");
         Device dev = CreateDevice(bary, geometry);
@@ -494,7 +494,7 @@ int main(int argc, char** argv) {
         request.context.memory = MemoryRegionView(std::span<const MemoryRegion>(memory));
         const std::vector<std::uint32_t> caps{1u,55u,56u,32u,33u,5283u,9u,10u,11u,22u,39u,61u,62u,63u,64u,65u,66u,67u,68u,4427u,4433u,4434u,4435u,4436u,4437u,4438u,4445u,4447u,4448u,4449u,4450u,5345u,5346u,5347u,5301u,5302u,5303u,5304u,5305u,6u,38u,41u,5u,17u,18u,19u,3u,2u,4u,7u,8u,45u,5249u};
         const std::array<std::string_view, 7> ext{"SPV_EXT_mesh_shader", "SPV_KHR_storage_buffer_storage_class", "SPV_KHR_physical_storage_buffer", "SPV_KHR_16bit_storage", "SPV_KHR_8bit_storage", "SPV_KHR_vulkan_memory_model", "SPV_KHR_shader_ballot"};
-        request.shader = {geometry ? ShaderStage::Geometry : pixel ? ShaderStage::Fragment : ShaderStage::Compute, 0x20000u, code};
+        request.shader = {geometry ? ShaderStage::Geometry : pixel ? ShaderStage::Fragment : vertex ? ShaderStage::Vertex : ShaderStage::Compute, 0x20000u, code};
         if (pixel) {
             ShaderPixelStageInfo px{};
             px.interpolatorCount = interpCount;
@@ -530,6 +530,10 @@ int main(int argc, char** argv) {
             drawVertices = inVerts;
             g.geometry = geom;
             request.graphics = g;
+            request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};
+        }
+        if (vertex) {
+            request.context.vertex = ShaderVertexStageInfo{};
             request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};
         }
         request.context.waveSize = wave;
@@ -721,27 +725,31 @@ int main(int argc, char** argv) {
         cpi.layout = pipelineLayout;
         VK(vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline));
         } else {
-            if (vsPath.empty()) throw std::runtime_error("a graphics stage needs a `vs <file.spv>` line");
-            const auto vsRaw = ReadFile(vsPath);
-            VkShaderModuleCreateInfo vmi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-            vmi.codeSize = vsRaw.size(); vmi.pCode = reinterpret_cast<const std::uint32_t*>(vsRaw.data());
-            VkShaderModule vsModule;
-            VK(vkCreateShaderModule(dev.device, &vmi, nullptr, &vsModule));
+            VkShaderModule vsModule = module;
+            if (!vertex) {
+                if (vsPath.empty()) throw std::runtime_error("a graphics stage needs a `vs <file.spv>` line");
+                const auto vsRaw = ReadFile(vsPath);
+                VkShaderModuleCreateInfo vmi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+                vmi.codeSize = vsRaw.size(); vmi.pCode = reinterpret_cast<const std::uint32_t*>(vsRaw.data());
+                VK(vkCreateShaderModule(dev.device, &vmi, nullptr, &vsModule));
+            }
             VkShaderModule fsModule = VK_NULL_HANDLE;
-            if (geometry) {
-                if (fsPath.empty()) throw std::runtime_error("stage gs needs a `fs <file.spv>` line");
+            if (geometry || vertex) {
+                if (fsPath.empty()) throw std::runtime_error("stage gs and stage vs need a `fs <file.spv>` line");
                 const auto fsRaw = ReadFile(fsPath);
                 VkShaderModuleCreateInfo fmi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
                 fmi.codeSize = fsRaw.size(); fmi.pCode = reinterpret_cast<const std::uint32_t*>(fsRaw.data());
                 VK(vkCreateShaderModule(dev.device, &fmi, nullptr, &fsModule));
             }
             VkPipelineShaderStageCreateInfo stages[3]{};
-            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsModule, "main", nullptr};
+            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsModule, "main", vertex && !entries.empty() ? &spec : nullptr};
             std::uint32_t stageCount = 2;
             VkPipelineShaderStageRequiredSubgroupSizeCreateInfo fragmentSubgroup{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
             fragmentSubgroup.requiredSubgroupSize = hostSubgroup;
             if (pixel) {
                 stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nativeSubgroup ? nullptr : &fragmentSubgroup, 0, VK_SHADER_STAGE_FRAGMENT_BIT, module, "main", entries.empty() ? nullptr : &spec};
+            } else if (vertex) {
+                stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsModule, "main", nullptr};
             } else {
                 stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_GEOMETRY_BIT, module, "main", entries.empty() ? nullptr : &spec};
                 stages[2] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsModule, "main", nullptr};

@@ -287,6 +287,23 @@ triangle, line-adjacency and triangle-adjacency host input. The draw supplies
 the matching 1, 2, 3, 4 or 6 vertices, and the guest program ignores its inputs,
 so the emitted geometry is the same.
 
+### Test vertex shader execution
+
+With the execution harness built and the SDK's `glslangValidator` on PATH, run:
+
+```powershell
+python tools/xbox/vs_test.py --exec "build-xbox/exec.exe"
+```
+
+The RDNA2 vertex shader reads the vertex index from `v5`, builds the triangle
+(-1,-1), (4,-1), (-1,4), and exports that position and one parameter holding
+(x, y, vertex index, 1). A GLSL fragment shader writes the interpolated parameter
+to a 13x7 RGBA32F target. W is 1 at every vertex, so at each pixel centre the
+parameter must equal the pixel's clip-space x and y, and its third channel
+((x + 1) + 2 (y + 1)) / 5, within 0.00001. The scenario uses `stage vs` and `fs`;
+the draw supplies three vertices and no vertex buffers, so a shader that calls a
+fetch subroutine or reads the instance index is not covered.
+
 ### Test texture sampling
 
 With the Vulkan execution harness built and the SDK's `glslangValidator` on PATH,
