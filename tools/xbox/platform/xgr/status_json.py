@@ -1,10 +1,11 @@
 """Write docs/xbox/xgr_status.json: for every xgameruntime interface, which of its methods have a real implementation in runtime/ (the rest log and fail).
-usage: python -I status_json.py <table.json from idl_table.py> <out.json>
-Implemented = the method name appears as an override entry ({"Name", ...}) in the runtime sources. Names are public GDK API names."""
+usage: python -I status_json.py <table.json from idl_table.py> <out.json> [<runtime directory>]
+Implemented = the method name appears as an override entry ({"Name", ...}) in the runtime sources. Names are public GDK API names. The runtime directory defaults to runtime/ next to this script."""
 import glob, json, os, re, sys
 here = os.path.dirname(os.path.abspath(__file__))
+runtime = sys.argv[3] if len(sys.argv) > 3 else os.path.join(here, "runtime")
 impl = set()
-for f in glob.glob(os.path.join(here, "runtime", "*.cpp")):
+for f in glob.glob(os.path.join(runtime, "*.cpp")):
     src = open(f, encoding="utf-8").read()
     impl.update(re.findall(r'\{"(X\w+)",\s*reinterpret', src))      # impl.cpp, impl_user.cpp
     impl.update(re.findall(r'GTX_OV\("(X\w+)"', src))               # xtask.cpp
