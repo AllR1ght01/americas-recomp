@@ -179,6 +179,25 @@ class CatalogLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "default must be boolean"):
                 probe_catalog.read_catalog(path)
 
+    def test_per_target_body_and_target_restriction_are_validated(self):
+        probe = copy.deepcopy(self.catalog["probes"][0])
+        probe["body_gfx11"] = probe["body"]
+        probe["only_on"] = ["gfx1013", "gfx1030"]
+        probe_catalog.validate_probe(probe, 1)
+        cases = (
+            ("body_gfx11", "# comment", "body must contain"),
+            ("body_gfx11", probe["body"] + "\n" + probe["body"], "body must contain"),
+            ("only_on", [], "only_on must be a nonempty array"),
+            ("only_on", ["gfx"], "only_on must be a nonempty array"),
+            ("only_on", ["gfx1013", 5], "only_on must be a nonempty array"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field, value=value):
+                malformed = copy.deepcopy(probe)
+                malformed[field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    probe_catalog.validate_probe(malformed, 1)
+
 
 class ProbeGenerationTests(unittest.TestCase):
     def setUp(self):
@@ -343,6 +362,30 @@ class ProbeRunTests(unittest.TestCase):
             self.assertEqual(report["device_label"], "rx-6750-xt")
             self.assertEqual(report["assembly_target"], "gfx1036")
             self.assertEqual(report["rows"][0]["output"], [0])
+
+    def test_run_uses_the_body_for_the_assembly_target(self):
+        probe = next(item for item in self.catalog["probes"] if "body_gfx11" in item)
+        outputs = [(index,) * 16 for index in range(len(probe["rows"]))]
+        for target, body in (("gfx1102", probe["body_gfx11"]), ("gfx1030", probe["body"])):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                with patch.object(probe_catalog.hw_oracle, "runtime", return_value="hsa"), \
+                        patch.object(probe_catalog.hw_oracle, "target", return_value=target), \
+                        patch.object(probe_catalog.hw_oracle, "run", return_value=outputs) as run:
+                    paths = probe_catalog.run_probes([probe], self.digest, temporary, "rx-7600")
+                self.assertEqual(run.call_args.args[0], body)
+                report = probe_catalog.compare_results.read_report(paths[0])
+                self.assertEqual(report["body"], body)
+
+    def test_run_skips_a_probe_outside_its_targets(self):
+        probe = next(item for item in self.catalog["probes"] if "only_on" in item)
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(probe_catalog.hw_oracle, "runtime", return_value="hsa"), \
+                    patch.object(probe_catalog.hw_oracle, "target", return_value="gfx1102"), \
+                    patch.object(probe_catalog.hw_oracle, "run") as run:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    paths = probe_catalog.run_probes([probe], self.digest, temporary, "rx-7600")
+            run.assert_not_called()
+            self.assertEqual(paths, [])
 
     def test_run_rejects_existing_measurements_instead_of_overwriting(self):
         probe = self.catalog["probes"][0]
