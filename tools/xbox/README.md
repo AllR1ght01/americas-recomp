@@ -41,7 +41,10 @@ Experimental tooling for running Xbox Series shader code through the shader reco
    `vin <first vgpr> <vgpr count> <input register>`): the VGPRs the runtime-built fetch subroutine fills. With it the
    shader's opening `s_swappc_b64` is replaced by host vertex attribute reads (see "Vertex fetch subroutine" in
    `docs/xbox/XBOX_SHADERS.md`). The embedded-fetch analyzer is pointed at s96, outside the 16 user words, because Xbox
-   shaders load no attribute tables themselves.
+   shaders load no attribute tables themselves. Argument 8 (with `-` for argument 7 when there is no table) is the ESGS
+   item size in dwords of a VS that is the export half of a legacy GS pipeline: it is compiled as a merged program (user
+   data from s8 to s39) whose LDS item writes become the outputs the geometry stage reads (see "Vertex export halves" in
+   `docs/xbox/XBOX_SHADERS.md`).
 4. `run_batch.py` runs the driver over a directory of blobs and validates with `spirv-val`.
 5. `stages.exe <code.bin>` times decode / CFG build / structurize separately (for the slow ray-tracing shaders).
 6. `exec.exe <scenario.txt>` is the execution harness: it recompiles a compute shader against REAL Vulkan device memory, dispatches it on the

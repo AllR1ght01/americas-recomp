@@ -26,13 +26,23 @@ SMEM_BUF = {'s_buffer_load_dword': 1, 's_buffer_load_dwordx2': 2, 's_buffer_load
 
 def user_sgprs(stage):
     """How many SGPRs (from s0) can hold user data. Mesh shaders (manifest stage '?', merged NGG): s0-s7 are system/hidden words and
-    user data runs to s39, so 40. Everything else: 16 (the harness driver passes 16 words for those stages)."""
+    user data runs to s39, so 40. Everything else: 16 (the harness driver passes 16 words for those stages), except the export halves
+    of legacy GS pipelines (export_half), which are merged programs like the mesh shaders."""
     return 40 if stage in ('?', 'GS') else 16
+
+
+def export_half(ins):
+    """A VS that ends with s_barrier and s_setpc_b64 into the GS half (run_full.esgs_item): s0-s7 are system words, user data runs
+    from s8 to s39, and the harness driver passes it that way."""
+    names = [i.name for i in ins if i.name != 's_endpgm']
+    return names[-2:] == ['s_barrier', 's_setpc_b64']
 
 
 def analyse(path, nuser=16):
     data = open(path, 'rb').read()
     ins, _ = rdna2.sweep(data, 0, len(data))
+    if export_half(ins):
+        nuser = max(nuser, 40)
     tag = {r: ('user', r) for r in range(0, nuser)}
     nodes = {}          # key -> id
     node_lines = []
