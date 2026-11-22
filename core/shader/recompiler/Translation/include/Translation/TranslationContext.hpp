@@ -18,7 +18,11 @@ public:
     void TranslateEmbeddedFetch(const RdnaInstruction& instruction, std::uint32_t attribute, std::uint32_t components);
     void TranslateInstruction(const RdnaInstruction& instruction);
     void SetBufferLdsSize(std::uint32_t bytes) { bufferLdsBytes = bytes; }
-    void SetPixelInput(const ShaderPixelInputInfo* info, bool barycentricEnabled) { pixelInput = info; fragmentShaderBarycentricEnabled = barycentricEnabled; }
+    void SetPixelInput(const ShaderPixelInputInfo* info, bool barycentricEnabled, std::uint32_t hostInputs = 0u) {
+        pixelInput = info;
+        fragmentShaderBarycentricEnabled = barycentricEnabled;
+        hostInterpolatedInputs = hostInputs;
+    }
     void SetFloatMode(const std::optional<ShaderFloatMode>& mode) {
         declaredFloatMode = mode;
         floatMode = mode;
@@ -401,10 +405,15 @@ private:
     bool emitInterpolation(const RdnaInstruction& inst);
     bool emitMemory(const RdnaInstruction& inst);
 
+    [[nodiscard]] bool useHostInterpolation(std::uint32_t attribute) const {
+        return !fragmentShaderBarycentricEnabled || (attribute < 32u && (hostInterpolatedInputs >> attribute & 1u) != 0u);
+    }
+
     std::uint32_t bufferLdsBytes = 0u;
     IrProgram& program;
     const ShaderPixelInputInfo* pixelInput = nullptr;
     bool fragmentShaderBarycentricEnabled = false;
+    std::uint32_t hostInterpolatedInputs = 0u;
     std::optional<ShaderFloatMode> floatMode;
     std::optional<ShaderFloatMode> declaredFloatMode;
     RoundingState rounding;

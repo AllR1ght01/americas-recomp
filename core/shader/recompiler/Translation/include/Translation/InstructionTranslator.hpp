@@ -35,6 +35,7 @@ struct TranslateOptions {
     std::uint32_t sharedVectorCount = 0;
     std::uint32_t sharedMemoryBytes = 0;
     std::uint64_t shaderHash = 0;
+    std::uint32_t hostInterpolatedInputs = 0;
     bool fragmentShaderBarycentricEnabled = false;
     bool interpolationFunctions = false;
     bool nativeFloat16 = false;

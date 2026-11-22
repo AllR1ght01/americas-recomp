@@ -1357,8 +1357,11 @@ void DefineMeshOutputs(SpirvEmitterState& state) {
         const auto type = MeshOutputType(state, output.kind);
         const bool shared = IsMeshPrimitiveOutput(output.kind);
         output.meshDataVariable = MeshArray(state, shared ? spv::StorageClassWorkgroup : spv::StorageClassPrivate, type, shared ? mesh.maxVertices : state.laneCount);
-        if (state.meshBarycentricVertex && output.kind == StageOutputKind::Parameter && std::ranges::find(state.meshExportedLocations, output.location) == state.meshExportedLocations.end()) {
-            continue;
+        auto exportedLocation = output.location;
+        if (state.meshBarycentricVertex && output.kind == StageOutputKind::Parameter) {
+            const auto exported = std::ranges::find_if(state.meshExportedLocations, [&](const auto& entry) { return entry.first == output.location; });
+            if (exported == state.meshExportedLocations.end()) continue;
+            exportedLocation = exported->second;
         }
         const auto primitiveBuiltIn = output.kind == StageOutputKind::Layer ? spv::BuiltInLayer : spv::BuiltInViewportIndex;
         const auto primitiveBlock = shared ? state.module.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, static_cast<std::uint32_t>(primitiveBuiltIn)}}, {spv::OpMemberDecorate, {0u, spv::DecorationPerPrimitiveEXT}}, {spv::OpDecorate, {spv::DecorationBlock}}}, type) : 0u;
@@ -1366,7 +1369,7 @@ void DefineMeshOutputs(SpirvEmitterState& state) {
         state.interfaceVariables.push_back(output.variableId);
         state.module.AddName(output.variableId, output.debugName);
         if (output.kind == StageOutputKind::Parameter) {
-            state.module.AddAnnotation(spv::OpDecorate, output.variableId, spv::DecorationLocation, output.location);
+            state.module.AddAnnotation(spv::OpDecorate, output.variableId, spv::DecorationLocation, exportedLocation);
         } else if (!shared) {
             state.module.AddAnnotation(spv::OpDecorate, output.variableId, spv::DecorationBuiltIn, output.kind == StageOutputKind::PointSize ? spv::BuiltInPointSize : spv::BuiltInPosition);
         }

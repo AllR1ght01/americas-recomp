@@ -760,7 +760,15 @@ struct BarycentricEmulationLayout {
     std::uint32_t linearLocation = NoLocation;
     std::uint32_t positionsLocation = NoLocation;
     std::uint32_t reciprocalWLocation = NoLocation;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> passedLocations;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> perVertexLocations;
+
+    [[nodiscard]] std::uint32_t PassedLocation(std::uint32_t location) const {
+        for (const auto& [guest, relocated] : passedLocations) {
+            if (guest == location) return relocated;
+        }
+        return location;
+    }
 };
 
 [[nodiscard]] BarycentricEmulationLayout LayoutBarycentricEmulation(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation, bool meshPositions = false);
@@ -772,6 +780,7 @@ struct EmulatedPerVertexParameter {
 
 struct EmulatedInterface {
     std::vector<std::uint32_t> passed;
+    std::vector<std::uint32_t> passedLocations;
     std::vector<bool> passedFlat;
     std::vector<EmulatedPerVertexParameter> perVertex;
     BarycentricEmulationLayout layout;
