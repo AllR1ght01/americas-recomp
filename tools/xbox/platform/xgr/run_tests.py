@@ -7,7 +7,7 @@ The IDLs are read to make table.json (idl_table.py) and the stub source (gen_stu
 Each test runs in the output directory with table.json next to it; test_save also runs a second time with `reopen`.
 In GitHub Actions each FAIL line becomes an error annotation and a summary table is written to the job summary.
 """
-import argparse, glob, os, pathlib, subprocess, sys, time
+import argparse, glob, os, pathlib, subprocess, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
@@ -117,4 +117,10 @@ def main():
         sys.exit("failed: " + ", ".join(failed))
 
 
-main()
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+try:
+    main()
+except Exception:
+    annotate("run_tests", traceback.format_exc().strip().splitlines()[-1])
+    raise
