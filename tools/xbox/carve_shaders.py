@@ -32,6 +32,7 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -176,6 +177,52 @@ def carve_one(name, offset, archive):
     }
 
 
+def write_carve(archive, entries, bins, vins, manifest):
+    print("names found:", len(entries), flush=True)
+    rows = []
+    errors = collections.Counter()
+    index = 0
+    for name, offset in entries:
+        result = carve_one(name, offset, archive)
+        if result["error"]:
+            errors[result["error"]] += 1
+            rows.append(
+                {
+                    "idx": "",
+                    "name": name,
+                    "kind": result.get("kind", ""),
+                    "stage": "",
+                    "bytes": "",
+                    "prologue": "",
+                    "error": result["error"],
+                }
+            )
+            continue
+        index += 1
+        with open(os.path.join(bins, "%d.bin" % index), "wb") as blob:
+            blob.write(result["code"])
+        if result["vin"]:
+            with open(os.path.join(vins, "%d.vin" % index), "w", newline="\n") as table:
+                table.write(result["vin"])
+        rows.append(
+            {
+                "idx": index,
+                "name": name,
+                "kind": result["kind"],
+                "stage": STAGES.get(result["kind"], "?"),
+                "bytes": len(result["code"]),
+                "prologue": int(result["prologue"]),
+                "error": "",
+            }
+        )
+
+    with open(manifest, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows, errors
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("archive", help="path to shaders.rpf")
@@ -211,53 +258,30 @@ def main():
     with open(arguments.archive, "rb") as handle, mmap.mmap(
         handle.fileno(), 0, access=mmap.ACCESS_READ
     ) as archive:
+        archive_stat = os.fstat(handle.fileno())
+        for path in (*managed, manifest):
+            if os.path.exists(path) and os.path.samestat(archive_stat, os.stat(path)):
+                parser.error("archive is also a carved output: %s" % path)
         entries = find_entries(archive)
         os.makedirs(bins, exist_ok=True)
         os.makedirs(vins, exist_ok=True)
-        for path in managed:
-            os.remove(path)
-        print("names found:", len(entries), flush=True)
-        rows = []
-        errors = collections.Counter()
-        index = 0
-        for name, offset in entries:
-            result = carve_one(name, offset, archive)
-            if result["error"]:
-                errors[result["error"]] += 1
-                rows.append(
-                    {
-                        "idx": "",
-                        "name": name,
-                        "kind": result.get("kind", ""),
-                        "stage": "",
-                        "bytes": "",
-                        "prologue": "",
-                        "error": result["error"],
-                    }
-                )
-                continue
-            index += 1
-            with open(os.path.join(bins, "%d.bin" % index), "wb") as blob:
-                blob.write(result["code"])
-            if result["vin"]:
-                with open(os.path.join(vins, "%d.vin" % index), "w", newline="\n") as table:
-                    table.write(result["vin"])
-            rows.append(
-                {
-                    "idx": index,
-                    "name": name,
-                    "kind": result["kind"],
-                    "stage": STAGES.get(result["kind"], "?"),
-                    "bytes": len(result["code"]),
-                    "prologue": int(result["prologue"]),
-                    "error": "",
-                }
-            )
-
-    with open(manifest, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+        with (
+            tempfile.TemporaryDirectory(dir=bins) as staged_bins,
+            tempfile.TemporaryDirectory(dir=vins) as staged_vins,
+            tempfile.TemporaryDirectory(dir=arguments.out) as staged_out,
+        ):
+            staged_manifest = os.path.join(staged_out, "manifest.csv")
+            rows, errors = write_carve(archive, entries, staged_bins, staged_vins, staged_manifest)
+            replaced = set()
+            for staged, destination in ((staged_bins, bins), (staged_vins, vins)):
+                for name in os.listdir(staged):
+                    path = os.path.join(destination, name)
+                    os.replace(os.path.join(staged, name), path)
+                    replaced.add(path)
+            for path in managed:
+                if path not in replaced:
+                    os.remove(path)
+            os.replace(staged_manifest, manifest)
 
     carved = [row for row in rows if not row["error"]]
     sizes = sorted(row["bytes"] for row in carved)
