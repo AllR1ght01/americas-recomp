@@ -376,6 +376,17 @@ class ProbeRunTests(unittest.TestCase):
                 report = probe_catalog.compare_results.read_report(paths[0])
                 self.assertEqual(report["body"], body)
 
+    def test_coverage_accepts_a_measurement_that_used_the_target_specific_body(self):
+        probe = next(item for item in self.catalog["probes"] if "body_gfx11" in item)
+        outputs = [(index,) * 16 for index in range(len(probe["rows"]))]
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(probe_catalog.hw_oracle, "runtime", return_value="hsa"), \
+                    patch.object(probe_catalog.hw_oracle, "target", return_value="gfx1102"), \
+                    patch.object(probe_catalog.hw_oracle, "run", return_value=outputs):
+                probe_catalog.run_probes([probe], self.digest, temporary, "rx-7600")
+            coverage = probe_catalog.coverage([probe], self.digest, temporary, "rx-7600")
+        self.assertEqual(coverage, [{"id": probe["id"], "status": "measured", "detail": ""}])
+
     def test_run_skips_a_probe_outside_its_targets(self):
         probe = next(item for item in self.catalog["probes"] if "only_on" in item)
         with tempfile.TemporaryDirectory() as temporary:

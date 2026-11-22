@@ -280,7 +280,8 @@ def validate_device_label(value):
     return value
 
 
-def make_result(probe, digest, device_label, target, runtime, outputs, hardware_identity=None):
+def make_result(probe, digest, device_label, target, runtime, outputs, hardware_identity=None,
+                probe_sha256=None):
     modes = probe["floating_point_modes"]
     result = {
         "schema_version": 1,
@@ -302,7 +303,7 @@ def make_result(probe, digest, device_label, target, runtime, outputs, hardware_
         "probe_instruction": probe["instruction"],
         "probe_description": probe["description"],
         "probe_catalog_sha256": digest,
-        "probe_sha256": probe_digest(probe),
+        "probe_sha256": probe_sha256 or probe_digest(probe),
         "device_label": device_label,
         "measured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -345,7 +346,8 @@ def run_probes(probes, digest, output_dir, device_label, hardware_identity=None,
         if any(type(word) is not int or word < 0 or word > 0xffffffff
                for output in outputs for word in output[:probe["output_registers"]]):
             raise ValueError(f"hardware oracle returned a non-dword result for {probe['id']}")
-        report = make_result(executed, digest, device_label, target, runtime, outputs, hardware_identity)
+        report = make_result(executed, digest, device_label, target, runtime, outputs, hardware_identity,
+                             probe_sha256=probe_digest(probe))
         reports.append((probe, destination, json.dumps(report, indent=2) + "\n"))
     for probe, destination, report in reports:
         write_atomic(destination, report)
@@ -396,12 +398,15 @@ def read_measurement(path, probe, device_label):
         return "invalid", str(error)
     if report.get("probe_sha256") != probe_digest(probe):
         return "stale", "probe definition digest differs"
+    target = report.get("assembly_target")
+    body = (probe["body_gfx11"] if isinstance(target, str) and target.startswith("gfx11")
+            and "body_gfx11" in probe else probe["body"])
     expected = {
         "probe_id": probe["id"],
         "probe_instruction": probe["instruction"],
         "probe_description": probe["description"],
         "device_label": device_label,
-        "body": probe["body"],
+        "body": body,
         "wave_size": probe["wave_size"],
         "floating_point_modes": probe["floating_point_modes"],
         "lds_bytes": probe["lds_bytes"],
