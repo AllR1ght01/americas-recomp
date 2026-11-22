@@ -402,6 +402,9 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_fssm_header.py)
         add_test(NAME xbox_platform_results COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_platform_results.py)
+        add_test(NAME xbox_wine_d3d12 COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_wine_d3d12.py)
+        set_tests_properties(xbox_wine_d3d12 PROPERTIES TIMEOUT 600)
         add_test(NAME xbox_xgr_idl_table COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_xgr_idl_table.py)
         add_test(NAME tools_compdb_inventory COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/tests/test_compile_database_inventory.py)
