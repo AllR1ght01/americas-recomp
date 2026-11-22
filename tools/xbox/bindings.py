@@ -17,8 +17,14 @@ import sys, struct, os, collections, hashlib
 # generator (harness_guard.py). driver.exe and run_real.py skip lines they do not know.
 VERSION = hashlib.sha256(open(os.path.abspath(__file__), 'rb').read().replace(b'\r\n', b'\n')).hexdigest()[:12]   # line-ending neutral
 sys.path.insert(0, '.')
-sys.path.insert(1, r'E:/Programming/rpf9shaders/out_disasm')   # rdna2.py
-import rdna2
+sys.path.insert(1, os.environ.get("XBOX_RDNA2_DIR", r'E:/Programming/rpf9shaders/out_disasm'))
+try:
+    if os.environ.get("XBOX_RDNA2") == "recomp":
+        raise ImportError
+    import rdna2
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import rdna2_recomp as rdna2
 
 SMEM_LOAD = {'s_load_dword': 1, 's_load_dwordx2': 2, 's_load_dwordx4': 4, 's_load_dwordx8': 8, 's_load_dwordx16': 16}
 SMEM_BUF = {'s_buffer_load_dword': 1, 's_buffer_load_dwordx2': 2, 's_buffer_load_dwordx4': 4, 's_buffer_load_dwordx8': 8, 's_buffer_load_dwordx16': 16}
@@ -28,7 +34,7 @@ def user_sgprs(stage):
     """How many SGPRs (from s0) can hold user data. Mesh shaders (manifest stage '?', merged NGG): s0-s7 are system/hidden words and
     user data runs to s39, so 40. Everything else: 16 (the harness driver passes 16 words for those stages), except the export halves
     of legacy GS pipelines (export_half), which are merged programs like the mesh shaders."""
-    return 40 if stage in ('?', 'GS') else 16
+    return 40 if stage in ('?', 'MS', 'GS') else 16
 
 
 def export_half(ins):
@@ -173,7 +179,7 @@ if __name__ == '__main__':
     names = [f for f in os.listdir(src) if f.endswith('.bin')]
     # stages from the manifest next to the bins dir (manifest_full.csv or manifest_all.csv); unknown -> 16 user SGPRs
     stage = {}
-    for m in ('manifest_full.csv', 'manifest_all.csv'):
+    for m in ('manifest_full.csv', 'manifest_all.csv', 'manifest.csv'):
         p = os.path.join(os.path.dirname(os.path.abspath(src)), m)
         if os.path.exists(p):
             import csv
