@@ -228,12 +228,12 @@ static void CheckErrorAndDisplay() {
 static void CheckFeatures() {
   Api feature = Get(kFeature);
   auto available = feature.At<BOOLEAN (*)(void*, uint32_t)>(3, "XGameRuntimeIsFeatureAvailable");
-  const uint32_t expectedOn[] = {0, 2, 3, 4, 5, 7, 9, 11, 12, 15, 16, 17, 18, 19, 20, 21};
-  const uint32_t expectedOff[] = {1, 13, 14, 22, 0xffffffffu};
+  const uint32_t expectedOn[] = {0, 2, 3, 4, 5, 7, 9, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21};
+  const uint32_t expectedOff[] = {1, 13, 22, 0xffffffffu};
   bool on = true, off = true;
   for (uint32_t f : expectedOn) on = on && available(feature.self, f);
   for (uint32_t f : expectedOff) off = off && !available(feature.self, f);
-  Check(on, "XGameRuntimeIsFeatureAvailable reports implemented features (XAsync, XAsyncProvider, XDisplay, XGame, XGameSave, XLauncher, XPackage, XPersistentLocalStorage, XSystem, XTaskQueue, XThread, XUser, XError, XGameEvent)");
+  Check(on, "XGameRuntimeIsFeatureAvailable reports implemented features (XAsync, XAsyncProvider, XDisplay, XGame, XGameSave, XLauncher, XPackage, XPersistentLocalStorage, XSystem, XTaskQueue, XThread, XUser, XError, XGameEvent, XStore)");
   Check(off, "XGameRuntimeIsFeatureAvailable reports unimplemented and unknown features as unavailable");
   Check(available(feature.self, 6) && available(feature.self, 8) && available(feature.self, 10),
         "XGameRuntimeIsFeatureAvailable follows the override table (XGameInvite, XGameUI, XNetworking)");

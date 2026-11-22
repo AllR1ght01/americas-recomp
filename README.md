@@ -12,11 +12,11 @@ Can an Xbox Series game run on a PC through [AnyPS5](https://github.com/boykopov
 
 | Stage | Shaders | Valid SPIR-V | Notes |
 |---|---|---|---|
-| Compute | 2,689 | **2,601 (96.7%)** | best of four fake-memory variants; 0 invalid |
-| Pixel | 12,098 | **7,037 (58.2%, strict)** | 7,271 with `VK_KHR_fragment_shader_barycentric`; 11,993 (99.1%) with that and the f16 approximation |
-| Vertex | 2,233 | 1,371 (61.4%) | the rest need the real vertex fetch shader |
-| Mesh | 9,282 | 8,904 (95.9%) | mesh configuration is a guess |
-| Geometry | 195 | not run | the driver has no geometry-shader mode |
+| Compute | 2,689 | **2,650 (98.6%)** | best of four fake-memory variants (default, unbacked, tiled T#, tiled V#); 0 invalid |
+| Pixel | 12,098 | **7,046 (58.2%, strict)** | 7,295 with `VK_KHR_fragment_shader_barycentric`; 12,063 (99.7%) with that and the f16 approximation |
+| Vertex | 2,233 | 1,402 (62.8%) | the rest need the real vertex fetch shader |
+| Mesh | 9,282 | 9,145 (98.5%) | mesh configuration is a guess |
+| Geometry | 195 | 195 (100%) | `spirv-val` only for the corpus; `gs_test.py` executes two synthetic geometry shaders |
 
 The corpus is the 26,503 shaders of `shaders.rpf` (26,497 went through the recompiler; 6 do not inflate). The strict pixel number is the headline: the f16 approximation is opt-in and off by default.
 
@@ -34,7 +34,7 @@ The corpus is the 26,503 shaders of `shaders.rpf` (26,497 went through the recom
 | Xbox DXIL to PC DXIL lowering | `tools/xbox/platform/xbox_dxil_lower.py`, `lower_all.py` | 22 of 53 builder shaders |
 | `xmem.dll`, `d3d12_xs.dll` stand-ins, `D3D12XboxCreateDevice` | `tools/xbox/platform` | load and run; the device layer covers only the calls seen so far |
 | Object proxy with per-slot logging (`XS_TRACE=1`) | `xbox_device_proxy.h` | works; shows what a title calls |
-| `xgameruntime.dll` stand-in | `tools/xbox/platform/xgr` | 308 of 398 methods implemented (threading, async, offline user, system and startup answers, persistent local storage, installed package, local save games, launching, game UI drawn by the title, handle tracking); the rest log and fail |
+| `xgameruntime.dll` stand-in | `tools/xbox/platform/xgr` | 388 of 398 methods implemented (threading, async, offline user, system and startup answers, persistent local storage, installed package, local save games, offline store with the game licensed, launching, game UI drawn by the title, handle tracking); the rest log and fail |
 
 How to use all of it once the game executable is available: [`tools/xbox/platform/README.md`](tools/xbox/platform/README.md).
 

@@ -299,14 +299,16 @@ Update after the pixel work: with the extra reference instructions (`s_wqm`, `v_
 
 | Stage | Shaders | Valid |
 |---|---|---|
-| Compute | 2,689 | 2,601 |
-| Pixel strict | 12,098 | 7,037 |
-| Pixel, with the host barycentric extension | 12,098 | 7,271 |
-| Pixel, extension and f16 approximation | 12,098 | 11,993 |
-| Vertex | 2,233 | 1,371 |
-| Mesh | 9,282 | 8,904 |
+| Compute | 2,689 | 2,650 |
+| Pixel strict | 12,098 | 7,046 |
+| Pixel, with the host barycentric extension | 12,098 | 7,295 |
+| Pixel, extension and f16 approximation | 12,098 | 12,063 |
+| Vertex | 2,233 | 1,402 |
+| Mesh | 9,282 | 9,145 |
 
-The pixel, vertex and mesh runs use the same single-guess harness defaults as the sample (float mode, export mapping, mesh configuration); only the compute numbers include the fake-memory variants. Nothing from these runs was executed.
+The pixel, vertex and mesh runs use the same single-guess harness defaults as the sample (float mode, export mapping, mesh configuration); only the compute numbers include the fake-memory variants (default, unbacked, tiled T#, tiled V#; `run_full.py` tried only three of the four until the 2026-11-22 rerun, which cost 57 compute shaders that validate only unbacked). Nothing from these runs was executed.
+
+Rerun on 2026-11-22 at `b947aae562` (after the contributor merges, including #25, #30, #39, #57, #75, #78): compute 2,601 -> 2,650, pixel strict 7,037 -> 7,046, pixel with both opt-ins 11,993 -> 12,063, vertex 1,371 -> 1,402, mesh 8,904 -> 9,145; the 195 geometry shaders all pass `spirv-val`. Two compute shaders time out (22618 and 23207) and 23206 takes about 48 s before it throws, so #39's under-a-second claim for 23206 and 23207 does not reproduce with this harness.
 
 (Pixel numbers above are after regenerating the new shaders' bindings with the current `bindings.py`; the first full run used an old copy without atomic-image marking, which failed 953 shaders on "atomic image descriptor uses an unsupported format 56".)
 

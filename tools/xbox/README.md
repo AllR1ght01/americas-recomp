@@ -133,8 +133,9 @@ assemble their RDNA2 programs with `rdna_asm.py` and read the harness path from
 - The official Windows LLVM has no AMDGPU `llvm-mc`, so set `XBOX_RDNA2=recomp` to
   assemble from the in-repo decoder (`rdna2_recomp.py`), which needs nothing outside
   the repository.
-- `XBOX_EXEC` must be an absolute path: these tests run `exec.exe` from a temporary
-  working directory, where a relative path does not resolve.
+- `XBOX_EXEC` is used from the directory you start the test in: the scenario files
+  are written to a temporary directory, but `exec.exe` itself is not run there. An
+  absolute path avoids depending on that directory.
 
 ```powershell
 $env:XBOX_EXEC = "$PWD\build-xbox\exec.exe"

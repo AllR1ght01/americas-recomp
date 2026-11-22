@@ -86,7 +86,12 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        for (std::size_t k = 0; k + 1 < 16; k += 2) { userData[k] = 0x10000000u + 0x100000u * static_cast<std::uint32_t>(k / 2); }
+        for (std::size_t k = 0; k + 1 < nud; k += 2) {
+            userData[k] = 0x10000000u + 0x100000u * static_cast<std::uint32_t>(k / 2);
+            Node& n = nodes[static_cast<std::uint32_t>(k / 2)];
+            n.id = static_cast<std::uint32_t>(k / 2);
+            n.base = userData[k];
+        }
     }
     std::vector<MemoryRegion> regions;
     for (auto& [id, n] : nodes) regions.push_back({n.base, std::as_bytes(std::span<const std::uint32_t>(n.mem))});

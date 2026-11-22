@@ -24,6 +24,7 @@ namespace gtx::xgr::streaming { const Override* overrides(size_t* count); }
 namespace gtx::xgr::accessibility { const Override* overrides(size_t* count); }
 namespace gtx::xgr::capture { const Override* overrides(size_t* count); }
 namespace gtx::xgr::misc { const Override* overrides(size_t* count); }
+namespace gtx::xgr::store { const Override* overrides(size_t* count); }
 namespace gtx::xgr::launch { const Override* overrides(size_t* count); }
 namespace gtx::xgr::ui { const Override* overrides(size_t* count); }
 namespace gtx::xgr::handles { const Override* overrides(size_t* count); }
@@ -166,6 +167,8 @@ const Override* overrides(size_t* count) {
     v.insert(v.end(), ca, ca + n);
     const Override* mi = misc::overrides(&n);
     v.insert(v.end(), mi, mi + n);
+    const Override* so = store::overrides(&n);
+    v.insert(v.end(), so, so + n);
     const Override* la = launch::overrides(&n);
     v.insert(v.end(), la, la + n);
     const Override* gu = ui::overrides(&n);

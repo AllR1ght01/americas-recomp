@@ -38,8 +38,12 @@ def parse(path):
         return struct.unpack_from('<II', d, dd + 8 * i) if i < ndd else (0, 0)
     er, _ = dir_(0)
     if er:
-        o = rva(er); nn = struct.unpack_from('<I', d, o + 24)[0]; names = rva(struct.unpack_from('<I', d, o + 32)[0])
+        o = rva(er)
+        base, nf, nn, address_rva, names_rva = struct.unpack_from('<IIIII', d, o + 16)
+        addresses, names = rva(address_rva), rva(names_rva)
         res['exports'] = [cs(rva(struct.unpack_from('<I', d, names + 4 * i)[0])) for i in range(nn)]
+        res['exports'].extend('#%d' % (base + i) for i in range(nf)
+                              if struct.unpack_from('<I', d, addresses + 4 * i)[0])
     ir, _ = dir_(1)
     if ir:
         o = rva(ir)

@@ -390,6 +390,9 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_dxil_lower.py)
         add_test(NAME xbox_dxil_sm66_wave COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_dxil_sm66_wave.py)
+        add_test(NAME xbox_pe_imports COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_pe_imports.py)
+        set_tests_properties(xbox_pe_imports PROPERTIES TIMEOUT 30)
         add_test(NAME isa_profiles COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_isa_profiles.py)
         add_test(NAME xbox_progress_svg COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_progress_svg.py)
@@ -397,13 +400,10 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_progress_report_inputs.py)
         add_test(NAME xbox_fssm_header COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_fssm_header.py)
-<<<<<<< HEAD
         add_test(NAME xbox_platform_results COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_platform_results.py)
-=======
         add_test(NAME xbox_xgr_idl_table COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_xbox_xgr_idl_table.py)
->>>>>>> pr45
         add_test(NAME tools_compdb_inventory COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/tests/test_compile_database_inventory.py)
         set_tests_properties(tools_compdb_inventory PROPERTIES TIMEOUT 20)
         add_test(NAME xbox_rdna2_llvm COMMAND ${Python3_EXECUTABLE}

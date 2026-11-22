@@ -7,7 +7,7 @@ still give their recorded outcomes (canary.py); either failing stops the run.
 Results are cached by a hash of every input (run_full_cache.json in the build dir), and jobs run slowest-first using the run times
 recorded in run_full_costs.json, so long compiles overlap with the short ones.
 
-Same drivers and defaults as run_corpus_bind.py (compute, driver_heap.exe, variants 0/2/3 until one validates) and
+Same drivers and defaults as run_corpus_bind.py (compute, driver_heap.exe, fake-memory variants default/0/2/3 until one validates) and
 run_graphics_final.py (PS/VS/MS, driver_gfx2.exe (XBOX_DRIVER_GFX overrides), PS both strict and with XBOX_ALLOW_UNMEASURED_F16_INTERP, barycentric extension
 retry). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
 killed run can be resumed by passing its own output as --skip. Stage '?' in the manifest is mesh (type 6/7), GS has no driver mode and
@@ -57,9 +57,9 @@ def classify(cmd, spv, env):
 
 def compute(idx):
     os.makedirs("spv_full", exist_ok=True)
-    for v in (None, 2, 3):
+    for v in (None, 0, 2, 3):          # None = the driver's default (zeros), 0 = unbacked, 2 = tiled T# records, 3 = tiled V# records
         spv = f"spv_full/{idx}.{v}.spv"
-        cmd = [BUILD + "driver_heap.exe", M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind"] + ([str(v)] if v else [])
+        cmd = [BUILD + "driver_heap.exe", M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind"] + ([str(v)] if v is not None else [])
         s, d = classify(cmd, spv, dict(os.environ))
         if os.path.exists(spv):
             os.remove(spv)

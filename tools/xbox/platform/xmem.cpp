@@ -9,25 +9,34 @@
 //                                        uses as a size; non-zero return = success (the caller maps 0 to "no data")
 //   XMemVirtualQuery(process, address, out)  out is a zeroed 64-byte struct that starts like MEMORY_BASIC_INFORMATION (State at +0x20 is tested
 //                                        against MEM_COMMIT) plus a field at +0x30 whose low two bits the caller tests; non-zero = success
-// What is NOT known: the meaning of the attribute bits, of the working-set struct beyond +8, and of the +0x30 field. The values below are
-// guesses chosen to let the callers proceed; XMEM_LOG=<file> logs every call so a real caller's use can be checked.
 #include <windows.h>
 #include <cstdio>
-static void Log(const char* what, void* p, ULONGLONG a, ULONGLONG b) {
+static void Log(const char* what, void* p, ULONGLONG a, ULONGLONG b, const ULONGLONG* attrs = nullptr) {
     char path[MAX_PATH];
-    if (!GetEnvironmentVariableA("XMEM_LOG", path, sizeof(path))) return;
+    DWORD length = GetEnvironmentVariableA("XMEM_LOG", path, sizeof(path));
+    if (!length || length >= sizeof(path)) return;
     FILE* f = nullptr;
-    if (fopen_s(&f, path, "a") == 0 && f) { fprintf(f, "%s ptr=%p a=0x%llx b=0x%llx\n", what, p, a, b); fclose(f); }
+    if (fopen_s(&f, path, "a") == 0 && f) {
+        fprintf(f, "%s ptr=%p a=0x%llx b=0x%llx", what, p, a, b);
+        if (attrs) {
+            ULONGLONG value = *attrs;
+            fprintf(f, " era_object_type=0x%llx era_page_size=%llu era_allocator_id=0x%llx"
+                       " era_alignment_log2=%llu era_memory_type=%llu era_reserved=0x%llx",
+                    value & 0x3fff, (value >> 14) & 3, (value >> 16) & 0xff,
+                    (value >> 24) & 0x1f, (value >> 29) & 0xf, value >> 33);
+        }
+        fputc('\n', f);
+        fclose(f);
+    }
 }
 extern "C" {
 __declspec(dllexport) void* XMemAlloc(SIZE_T size, ULONGLONG attrs) {
-    // VirtualAlloc returns 64 KiB aligned zeroed memory, which satisfies any alignment the caller can ask for
     void* p = VirtualAlloc(nullptr, size ? size : 1, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    Log("alloc", p, size, attrs);
+    Log("alloc", p, size, attrs, &attrs);
     return p;
 }
 __declspec(dllexport) void XMemFree(void* p, ULONGLONG attrs) {
-    Log("free ", p, 0, attrs);
+    Log("free ", p, 0, attrs, &attrs);
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 __declspec(dllexport) BOOL XMemGetWorkingSetStatistics(DWORD kind, ULONGLONG* out) {

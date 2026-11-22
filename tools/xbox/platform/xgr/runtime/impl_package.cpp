@@ -869,4 +869,8 @@ const Override* overrides(size_t* count) {
   return kOverrides;
 }
 
+const std::string& current_package_identifier() { return identity().packageId; }
+
+const std::string& current_store_id() { return identity().storeId; }
+
 }  // namespace gtx::xgr::package

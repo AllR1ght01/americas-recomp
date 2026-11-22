@@ -1789,7 +1789,7 @@ private:
         std::string failure;
         bool foldedValue = false;
         std::vector<std::vector<IrValue*>> arms;
-        std::map<std::vector<IrValue*>, IrValue*> selectors;
+        std::map<std::pair<std::vector<IrValue*>, const IrValue*>, IrValue*> selectors;
         std::vector<std::pair<IrBlock*, IrValue*>> phis;
         std::vector<std::tuple<IrBlock*, IrValue*, IrValue*>> lanes;
         std::unordered_map<IrValue*, IrValue*> resolved;
@@ -1842,9 +1842,22 @@ private:
         return {};
     }
 
-    IrValue* WebSelector(std::vector<IrValue*> tuple, DescriptorWeb& web, IrValue& position) {
+    static std::size_t InstructionPosition(const IrBlock* block, const IrValue* value) {
+        if (block == nullptr) return 0u;
+        std::size_t pos = 0u;
+        for (const IrValue* inst : block->Instructions()) {
+            if (inst == value) return pos;
+            ++pos;
+        }
+        return pos;
+    }
+
+    IrValue* WebSelector(std::vector<IrValue*> tuple, DescriptorWeb& web, IrValue& position, const IrValue* activeMask = nullptr) {
         for (IrValue*& value : tuple) {
             value = value->Resolve();
+            while (activeMask != nullptr && value->Opcode() == IrOpcode::SelectU32 && value->ArgumentCount() == 3u && Detail::ActiveMaskImplies(m_program.Resources(), activeMask, value->Argument(0))) {
+                value = value->Argument(1)->Resolve();
+            }
             if (!value->IsPhi()) {
                 continue;
             }
@@ -1854,8 +1867,12 @@ private:
                 entry->second = invariant == nullptr ? value : invariant->Resolve();
             }
             value = entry->second;
+            while (activeMask != nullptr && value->Opcode() == IrOpcode::SelectU32 && value->ArgumentCount() == 3u && Detail::ActiveMaskImplies(m_program.Resources(), activeMask, value->Argument(0))) {
+                value = value->Argument(1)->Resolve();
+            }
         }
-        if (const auto known = web.selectors.find(tuple); known != web.selectors.end()) {
+        const auto key = std::make_pair(tuple, activeMask);
+        if (const auto known = web.selectors.find(key); known != web.selectors.end()) {
             return known->second;
         }
         if (!StrictDescriptorWebs()) {
@@ -1875,24 +1892,41 @@ private:
                 web.order.emplace(order[index], index);
             }
         }
-        const auto phi = std::ranges::find_if(tuple, [](const IrValue* value) { return value->IsPhi(); });
+        IrBlock* block = nullptr;
+        std::size_t latest = 0;
+        for (const IrValue* value : tuple) {
+            if (!value->IsPhi()) {
+                continue;
+            }
+            const auto found = web.order.find(value->Parent());
+            if (found == web.order.end()) {
+                return GiveUp(web, "a descriptor Phi is in a block outside the program order");
+            }
+            if (block == nullptr || found->second > latest) {
+                block = value->Parent();
+                latest = found->second;
+            }
+        }
         IrValue* lane = nullptr;
         std::size_t laneOrder = 0;
+        std::size_t lanePos = 0;
         for (IrValue* value : tuple) {
             if (value->Opcode() != IrOpcode::SelectU32 && value->Opcode() != IrOpcode::ReadFirstLane) {
                 continue;
             }
             const auto found = web.order.find(value->Parent());
             const std::size_t index = found == web.order.end() ? 0u : found->second;
-            if (lane == nullptr || index > laneOrder) {
+            const std::size_t pos = InstructionPosition(value->Parent(), value);
+            if (lane == nullptr || index > laneOrder || (index == laneOrder && pos > lanePos)) {
                 lane = value;
                 laneOrder = index;
+                lanePos = pos;
             }
         }
-        if (phi == tuple.end() && lane != nullptr) {
-            return LaneSelector(tuple, *lane, web, position);
+        if (lane != nullptr && (block == nullptr || laneOrder >= latest)) {
+            return LaneSelector(tuple, *lane, web, position, activeMask);
         }
-        if (phi == tuple.end()) {
+        if (block == nullptr) {
             if (std::ranges::any_of(tuple, [](IrValue* value) { return Detail::HoldsFoldableValue(value, phiSearchDepth); })) {
                 if (StrictDescriptorWebs()) {
                     return GiveUp(web, "a descriptor dword depends on the program counter, EXEC, a lane mask, the lane index or texels");
@@ -1921,24 +1955,6 @@ private:
             web.arms.push_back(std::move(tuple));
             return &m_builder.Constant(static_cast<std::uint32_t>(web.arms.size() - 1u));
         }
-        IrBlock* block = nullptr;
-        std::size_t latest = 0;
-        for (const IrValue* value : tuple) {
-            if (!value->IsPhi()) {
-                continue;
-            }
-            const auto found = web.order.find(value->Parent());
-            if (found == web.order.end()) {
-                return GiveUp(web, "a descriptor Phi is in a block outside the program order");
-            }
-            if (block == nullptr || found->second > latest) {
-                block = value->Parent();
-                latest = found->second;
-            }
-        }
-        if (block == nullptr) {
-            return GiveUp(web, "a descriptor Phi has no block");
-        }
         if (web.selectors.size() == DescriptorWeb::maxStates) {
             return GiveUp(web, "more than 512 descriptor states");
         }
@@ -1952,7 +1968,7 @@ private:
             }
         }
         IrValue& selector = m_program.CreateValue(IrOpcode::Phi, IrType::U32);
-        web.selectors.emplace(tuple, &selector);
+        web.selectors.emplace(key, &selector);
         web.phis.emplace_back(block, &selector);
         for (IrBlock* predecessor : predecessors) {
             std::vector<IrValue*> incoming;
@@ -1963,7 +1979,7 @@ private:
                 }
                 incoming.push_back(edge);
             }
-            IrValue* edgeSelector = WebSelector(std::move(incoming), web, position);
+            IrValue* edgeSelector = WebSelector(std::move(incoming), web, position, activeMask);
             if (edgeSelector == nullptr) {
                 return nullptr;
             }
@@ -1972,7 +1988,7 @@ private:
         return &selector;
     }
 
-    IrValue* LaneSelector(const std::vector<IrValue*>& tuple, IrValue& first, DescriptorWeb& web, IrValue& position) {
+    IrValue* LaneSelector(const std::vector<IrValue*>& tuple, IrValue& first, DescriptorWeb& web, IrValue& position, const IrValue* activeMask) {
         IrBlock* block = first.Parent();
         const auto op = first.Opcode();
         const bool select = op == IrOpcode::SelectU32;
@@ -1982,28 +1998,40 @@ private:
         if (web.selectors.size() == DescriptorWeb::maxStates) {
             return GiveUp(web, "more than 512 descriptor states");
         }
+        const auto blockOrderIt = web.order.find(block);
+        const std::size_t blockOrder = blockOrderIt == web.order.end() ? 0u : blockOrderIt->second;
+        const std::size_t firstPos = InstructionPosition(block, &first);
         IrValue* shared = first.Argument(select ? 0u : 1u);
+        std::vector<IrValue*> matched;
         std::vector<IrValue*> left;
         std::vector<IrValue*> right;
         for (IrValue* value : tuple) {
             if (value->Opcode() == op && value->Parent() == block && value->ArgumentCount() == first.ArgumentCount() && EquivalentValue(m_program.Resources(), value->Argument(select ? 0u : 1u), shared)) {
+                matched.push_back(value);
                 left.push_back(value->Argument(select ? 1u : 0u));
                 if (select) {
                     right.push_back(value->Argument(2u));
                 }
-            } else if (value->HasImmediate() || (select && !value->IsPhi() && value->Opcode() != IrOpcode::ReadFirstLane)) {
-                left.push_back(value);
-                if (select) {
-                    right.push_back(value);
-                }
             } else {
-                return GiveUp(web, "a per-lane descriptor selection mixes dwords selected differently");
+                const bool leaf = !value->IsPhi() && value->Opcode() != IrOpcode::SelectU32 && value->Opcode() != IrOpcode::ReadFirstLane;
+                const bool precedes = value->HasImmediate() || value->Parent() == nullptr ||
+                    (value->Parent() == block ? (value->IsPhi() || InstructionPosition(block, value) < firstPos)
+                                              : (web.order.contains(value->Parent()) && web.order.at(value->Parent()) < blockOrder));
+                const bool uniformNonLane = !select && ((leaf && !Detail::HoldsFoldableValue(value, phiSearchDepth)) || (value->IsPhi() && precedes && activeMask == nullptr));
+                if (value->HasImmediate() || (select && (leaf || precedes)) || uniformNonLane) {
+                    left.push_back(value);
+                    if (select) {
+                        right.push_back(value);
+                    }
+                } else {
+                    return GiveUp(web, "a per-lane descriptor selection mixes dwords selected differently");
+                }
             }
         }
         auto& instructions = block->Instructions();
         auto latest = instructions.end();
         for (auto it = instructions.begin(); it != instructions.end(); ++it) {
-            if (std::ranges::find(tuple, *it) != tuple.end()) {
+            if (std::ranges::find(matched, *it) != matched.end()) {
                 latest = it;
             }
         }
@@ -2011,35 +2039,86 @@ private:
             return GiveUp(web, "a per-lane descriptor selection is not in its block");
         }
         IrValue* before = std::next(latest) == instructions.end() ? nullptr : *std::next(latest);
-        IrValue* leftSelector = WebSelector(std::move(left), web, position);
+        const IrValue* nextMask = select ? activeMask : shared;
+        IrValue* leftSelector = WebSelector(std::move(left), web, position, nextMask);
         if (leftSelector == nullptr) {
             return nullptr;
         }
-        IrValue& node = m_program.CreateValue(op, IrType::U32, first.Flags<std::uint64_t>());
         if (select) {
-            IrValue* rightSelector = WebSelector(std::move(right), web, position);
+            IrValue* rightSelector = WebSelector(std::move(right), web, position, activeMask);
             if (rightSelector == nullptr) {
                 return nullptr;
             }
+            if (leftSelector == rightSelector) {
+                web.selectors.emplace(std::make_pair(tuple, activeMask), leftSelector);
+                return leftSelector;
+            }
+            IrValue& node = m_program.CreateValue(op, IrType::U32, first.Flags<std::uint64_t>());
             node.AddArgument(shared);
             node.AddArgument(leftSelector);
             node.AddArgument(rightSelector);
-        } else {
-            node.AddArgument(leftSelector);
-            node.AddArgument(shared);
+            web.selectors.emplace(std::make_pair(tuple, activeMask), &node);
+            web.lanes.emplace_back(block, before, &node);
+            return &node;
         }
-        web.selectors.emplace(tuple, &node);
+        if (leftSelector->HasImmediate()) {
+            web.selectors.emplace(std::make_pair(tuple, activeMask), leftSelector);
+            return leftSelector;
+        }
+        IrValue& node = m_program.CreateValue(op, IrType::U32, first.Flags<std::uint64_t>());
+        node.AddArgument(leftSelector);
+        node.AddArgument(shared);
+        web.selectors.emplace(std::make_pair(tuple, activeMask), &node);
         web.lanes.emplace_back(block, before, &node);
         return &node;
+    }
+
+    IrValue* PointerSplitAddress(IrValue* handle) const {
+        IrValue* addr = nullptr;
+        for (std::size_t dword = 0; dword < handle->ArgumentCount(); dword++) {
+            IrValue* load = handle->Argument(dword)->Resolve();
+            std::uint32_t memoryIndex = 0u;
+            if (load->Opcode() != IrOpcode::LoadAddressU32 || load->ArgumentCount() < 2u ||
+                ScalarAddressMemory(*load, memoryIndex) == nullptr ||
+                !RegisterOnlyOffset(load->Argument(1), phiSearchDepth)) {
+                return nullptr;
+            }
+            IrValue* currentAddr = load->Argument(0)->Resolve();
+            if (currentAddr->Opcode() != IrOpcode::GetAddressResource || currentAddr->ArgumentCount() != 2u) {
+                return nullptr;
+            }
+            if (addr == nullptr) {
+                addr = currentAddr;
+            } else if (currentAddr != addr && !EquivalentValue(m_program.Resources(), addr, currentAddr)) {
+                return nullptr;
+            }
+        }
+        if (addr == nullptr) {
+            return nullptr;
+        }
+        std::vector<IrValue*> addrPhis;
+        CollectDescriptorPhis(addr->Argument(0), addrPhis, phiSearchDepth);
+        CollectDescriptorPhis(addr->Argument(1), addrPhis, phiSearchDepth);
+        return addrPhis.empty() ? nullptr : addr;
     }
 
     bool SplitDescriptorWeb(IrValue& inst, const std::array<IrValue*, 2>& handles, const std::array<bool, 2>& split, std::uint32_t handleCount, bool recordFailure = true) {
         std::vector<IrValue*> tuple;
         std::array<std::size_t, 2> offsets {};
+        std::array<IrValue*, 2> pointerAddrs {};
         for (std::uint32_t slot = 0; slot < handleCount; slot++) {
             offsets[slot] = tuple.size();
-            for (std::size_t dword = 0; split[slot] && dword < handles[slot]->ArgumentCount(); dword++) {
-                tuple.push_back(handles[slot]->Argument(dword));
+            if (!split[slot]) {
+                continue;
+            }
+            pointerAddrs[slot] = PointerSplitAddress(handles[slot]);
+            if (pointerAddrs[slot] != nullptr) {
+                tuple.push_back(pointerAddrs[slot]->Argument(0));
+                tuple.push_back(pointerAddrs[slot]->Argument(1));
+            } else {
+                for (std::size_t dword = 0; dword < handles[slot]->ArgumentCount(); dword++) {
+                    tuple.push_back(handles[slot]->Argument(dword));
+                }
             }
         }
         DescriptorWeb web;
@@ -2099,7 +2178,26 @@ private:
             const std::array<IrValue*, 2> compare {selector, &m_builder.Constant(arm)};
             conditions.push_back(EmitBefore(inst, IrOpcode::IEqual32, IrType::Bool, compare));
         }
-        ReplaceWithArmCopies(inst, handles, split, handleCount, conditions, true, [&](std::uint32_t arm, std::uint32_t slot, std::size_t dword) {
+        std::vector<std::array<IrValue*, 2>> rebuiltAddrs(web.arms.size(), {nullptr, nullptr});
+        ReplaceWithArmCopies(inst, handles, split, handleCount, conditions, pointerAddrs[0] == nullptr, [&](std::uint32_t arm, std::uint32_t slot, std::size_t dword) {
+            if (pointerAddrs[slot] != nullptr) {
+                IrValue*& armAddr = rebuiltAddrs[arm][slot];
+                if (armAddr == nullptr) {
+                    const std::array<IrValue*, 2> addrArgs {
+                        Rematerialize(web.arms[arm][offsets[slot]], inst, true, phiSearchDepth),
+                        Rematerialize(web.arms[arm][offsets[slot] + 1u], inst, true, phiSearchDepth),
+                    };
+                    armAddr = EmitCopy(*pointerAddrs[slot], addrArgs, inst);
+                }
+                const IrValue* origLoad = handles[slot]->Argument(dword)->Resolve();
+                std::vector<IrValue*> loadArgs;
+                loadArgs.reserve(origLoad->ArgumentCount());
+                loadArgs.push_back(armAddr);
+                for (std::size_t idx = 1u; idx < origLoad->ArgumentCount(); idx++) {
+                    loadArgs.push_back(Rematerialize(origLoad->Argument(idx), inst, true, phiSearchDepth));
+                }
+                return EmitCopy(*origLoad, loadArgs, inst);
+            }
             return Rematerialize(web.arms[arm][offsets[slot] + dword], inst, true, phiSearchDepth);
         });
         return true;

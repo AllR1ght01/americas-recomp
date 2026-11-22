@@ -3,12 +3,20 @@
 What the package's DLLs need from the platform, and stand-ins for the Xbox-only parts. Result summary: `docs/xbox/PLATFORM_SURFACE.md`.
 
 * `pe_imports.py <dir> <out.json>` lists the static imports (normal and delay-load) and exports of every PE file under a directory.
+  Exports include names and `#<ordinal>` entries for nonzero export-address-table slots, including named aliases and forwarders.
+  Empty slots are excluded. The ordinal is the export directory's ordinal base plus the slot index, as specified by the
+  [PE export address table](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#export-address-table).
 * `make_platform_results.py <imports.json>` classifies each imported function (standard Windows / shipped in the package / needs a shim) and
   stores it under `"platform"` in `docs/xbox/results.json` for the progress map. Windows only.
 * `d3d12_xs_device.cpp` (build with `d3d12_xs.cpp`) adds `D3D12XboxCreateDevice`: a PC device behind the Xbox-ABI proxy with the deviations learned so far (`xbox_device_overrides.h`: descriptor heap handles in RAX, resource creation at slot 76). The parameter struct is only logged. On a device without typed-UAV support for `R9G9B9E5_SHAREDEXP` (NVIDIA), slot 76 creates a UAV resource of that format as `R16G16B16A16_FLOAT` (every RGB9E5 value is exact in f16; writes are not rounded to RGB9E5 and the memory layout differs) and slots 18/19 rewrite RGB9E5 views of it; `XS_NO_FORMAT_FALLBACK=1` keeps the original format. `XS_LOG` and `XS_TRACE=1` show what a title does with it.
 * `xmem.cpp` is a stand-in `xmem.dll` (XMemAlloc, XMemFree, XMemGetWorkingSetStatistics, XMemVirtualQuery); `d3d12_xs.cpp` forwards the two
   `d3d12_xs.dll` functions the DLLs import to the PC `d3d12.dll`. Build each with `cl /LD /O2 file.cpp /Fe:name.dll`. Argument shapes were read from the callers' machine code;
-  the meaning of the attribute bits and of two output fields is a guess (see the comments in `xmem.cpp`). `XMEM_LOG=<file>` logs every call.
+  the allocation semantics and two output fields remain unverified. `XMEM_LOG=<file>` logs every call.
+  Allocation and free records retain the raw `a` and `b` values and append `era_object_type`, `era_page_size`, `era_allocator_id`,
+  `era_alignment_log2`, `era_memory_type` and `era_reserved`. These fields interpret `b` using the public ERA bit layout;
+  page size and memory type are numeric codes, and alignment is an exponent. Unknown values are printed without rejection.
+  This is diagnostic decoding; the allocator still uses `VirtualAlloc` for all attribute words. Sources and limitations are recorded
+  in the `XMemAlloc and XMemFree` technical-debt entries.
 * `bvh_test.cpp` and `ffx_test.cpp` run the package's BVH builder and FidelityFX DLLs on a PC D3D12 device behind `xbox_device_proxy.h` (what works and where it stops: PLATFORM_SURFACE.md).
 * `bink_test.cpp` loads `Bink2Scarlett.dll` next to a stand-in `xmem.dll`, decodes every frame of a video and saves two frames as raw BGRA.
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).
@@ -41,3 +49,10 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
 * Not done: the 31 shaders using raw 64-bit addresses (design in PLATFORM_SURFACE.md).
 
 No game files are part of this repository: the DLLs, the videos and the decoded frames stay local.
+
+## XMem trace test
+
+From an x64 Visual Studio prompt, build the stand-in with `cl /LD /O2 xmem.cpp /Fe:xmem.dll`.
+Run `python xmem_test.py --dll <path-to-xmem.dll>` with 64-bit Windows Python. The test uses synthetic calls and temporary log files;
+it checks both reported attribute words, field boundaries including bit 32, reserved bits, unknown encodings, allocation/free records,
+non-allocation records and disabled logging. No game files or GPU are needed.

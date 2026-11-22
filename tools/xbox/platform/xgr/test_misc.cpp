@@ -89,6 +89,7 @@ static const GUID kUser = {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 
 static const GUID kSystem3 = {0x67ce4bfc, 0xb1d1, 0x4ac7, {0xbc, 0x3a, 0xcb, 0x92, 0x19, 0xa9, 0x7a, 0x85}};
 static const GUID kActivation = {0x2e4f76fe, 0x0fc7, 0x461e, {0xab, 0x4d, 0xa4, 0x49, 0x94, 0x34, 0xc3, 0xcf}};
 static const GUID kInvite2 = {0x014d1cc3, 0xbcfe, 0x41ff, {0xb2, 0xf0, 0xe1, 0xef, 0x07, 0x15, 0x58, 0x28}};
+static const GUID kStore = {0x0dd112ac, 0x7c24, 0x448c, {0xb9, 0x2b, 0x39, 0x60, 0xfb, 0x5b, 0xd3, 0x0c}};
 static const GUID kError = {0x8ca467f7, 0x22e8, 0x4096, {0x84, 0x56, 0xbb, 0x8a, 0xa1, 0x3f, 0x79, 0xd8}};
 
 constexpr uint32_t kManual = 0;
@@ -330,6 +331,7 @@ static bool CALLBACK RecordError(HRESULT, const char* message, void* context) {
   return false;
 }
 
+constexpr uint32_t kStoreContextHandle = 9;
 constexpr uint32_t kTaskQueueHandle = 12;
 constexpr uint32_t kUserHandle = 13;
 constexpr uint32_t kCreated = 0;
@@ -373,6 +375,15 @@ static void CheckHandleTracking() {
   Check(valid(system3.self, handle) && recorder.Count(handle, kUserHandle, kDestroyed) == 0, "a duplicated User handle stays valid until its last close");
   user.At<void (*)(void*, void*)>(4, "XUserCloseHandle")(user.self, handle);
   Check(!valid(system3.self, handle) && recorder.Count(handle, kUserHandle, kDestroyed) == 1, "closing the last User handle reports Destroyed");
+
+  Api store = Get("IXStoreImpl", kStore);
+  void* context = nullptr;
+  store.At<HRESULT (*)(void*, void*, void**)>(3, "XStoreCreateContext")(store.self, nullptr, &context);
+  Check(context && recorder.Count(context, kStoreContextHandle, kCreated) == 1 && valid(system3.self, context),
+        "XStoreCreateContext reports a created StoreContext handle");
+  store.At<void (*)(void*, void*)>(4, "XStoreCloseContextHandle")(store.self, context);
+  Check(!valid(system3.self, context) && recorder.Count(context, kStoreContextHandle, kDestroyed) == 1,
+        "XStoreCloseContextHandle reports the StoreContext handle destroyed");
 
   Check(!valid(system3.self, nullptr), "XSystemIsHandleValid rejects a null handle");
   int notAHandle = 0;
