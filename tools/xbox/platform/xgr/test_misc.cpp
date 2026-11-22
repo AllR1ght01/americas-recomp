@@ -426,7 +426,8 @@ static void CheckPendingInvites() {
   Api invite = Get("IXGameInviteImpl2", kInvite2);
   auto acceptInvite = invite.At<HRESULT (*)(void*, const char*)>(7, "XGameInviteAcceptPendingInvite");
   Check(acceptInvite(invite.self, "ms-xbl-0://invite") == kNotFound, "XGameInviteAcceptPendingInvite reports no such pending invite");
-  Check(acceptInvite(invite.self, nullptr) == E_INVALIDARG, "XGameInviteAcceptPendingInvite rejects a null invite URI");
+  Check(acceptInvite(invite.self, nullptr) == E_INVALIDARG && acceptInvite(invite.self, "") == E_INVALIDARG,
+        "XGameInviteAcceptPendingInvite rejects a null or empty invite URI");
 }
 
 int main() {
