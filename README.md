@@ -24,14 +24,14 @@ The corpus is the 26,503 shaders of `shaders.rpf` (26,497 went through the recom
 
 - **Execution against a CPU reference.** 242 compute and 157 of 738 pixel shaders were run on a GPU and compared bit for bit with an independent CPU interpreter. The pixel run found no differences. The compute run found one recompiler bug (fixed) and one few-ulp difference explained by a 1-ulp hardware reciprocal. The pixel check uses one constant input, so it says little about interpolation. See [`docs/xbox/XBOX_SHADERS.md`](docs/xbox/XBOX_SHADERS.md).
 - **Package DLLs.** All 611 functions imported by the 16 DLLs shipped with the game resolve on a PC; 6 of them (`xmem.dll`, `d3d12_xs.dll`) need the stand-ins in `tools/xbox/platform/`. The game's Bink decoder decodes a real video through the `xmem.dll` stand-in. Static imports only, so this is not a completion figure ([`PLATFORM_SURFACE.md`](docs/xbox/PLATFORM_SURFACE.md)).
-- **BVH builder shaders.** The 53 ray-tracing builder shaders use `@xbox.*` intrinsics that crash the AMD PC compiler. 22 of them lower to standard DXIL, sign, compile and dispatch on an RX 7800 XT. The lowered min/max/med3, packed f16 and wave operations match a software model, and the output of the pure-ALU ones is identical on the GPU and on WARP. The other 31 read 64-bit GPU addresses from buffers and need the real addresses from a running game.
+- **BVH builder shaders.** The 53 ray-tracing builder shaders use `@xbox.*` intrinsics that crash the AMD PC compiler. All 53 now lower to standard DXIL and sign, and 44 create as pipelines on a PC device: the 31 that read 64-bit GPU addresses (through the address table from #112 and #119, which maps an address to a resource but still needs the real addresses a running game would provide) and 13 of the 22 that need no table. The other 9 need 64-lane waves, which `wave64_emulate.py` replaces with thread-group memory (#130, verified on synthetic kernels; those nine shaders themselves were not available to run it on). The lowered min/max/med3, packed f16 and wave operations match a software model, and the output of the pure-ALU ones is identical on the GPU and on WARP.
 
 ## What is built
 
 | Part | Where | State |
 |---|---|---|
 | Recompiler changes (waterfall descriptor loops, faster structurizer, Xbox ISA, shader header decoder) | `core/shader`, `tools/xbox` | in use for all numbers above |
-| Xbox DXIL to PC DXIL lowering | `tools/xbox/platform/xbox_dxil_lower.py`, `lower_all.py` | 22 of 53 builder shaders |
+| Xbox DXIL to PC DXIL lowering | `tools/xbox/platform/xbox_dxil_lower.py`, `lower_all.py` | all 53 builder shaders lower and sign; 44 create as pipelines on a PC device |
 | `xmem.dll`, `d3d12_xs.dll` stand-ins, `D3D12XboxCreateDevice` | `tools/xbox/platform` | load and run; the device layer covers only the calls seen so far |
 | Object proxy with per-slot logging (`XS_TRACE=1`) | `xbox_device_proxy.h` | works; shows what a title calls |
 | `xgameruntime.dll` stand-in | `tools/xbox/platform/xgr` | 388 of 398 methods implemented (threading, async, offline user, system and startup answers, persistent local storage, installed package, local save games, offline store with the game licensed, launching, game UI drawn by the title, handle tracking); the rest log and fail |
@@ -40,10 +40,10 @@ How to use all of it once the game executable is available: [`tools/xbox/platfor
 
 ## What does not work yet
 
-- **Pixel (strict):** most failures read a 16-bit interpolant, refused unless the f16 approximation is on (Xbox sets round-toward-zero and there is no measured model). With every opt-in, 105 still fail: descriptor and sampler chains, 15 over the barycentric location limit, 14 sampling with clamps the emitter rejects.
-- **Vertex (862):** 562 computed `s_swappc` targets and 223 fetch-shader calls with no parsed plan. Vertex layout comes from pipeline state, so these wait for the executable.
-- **Mesh (378):** 239 sampler and image descriptor chains, 100 runtime-indexed descriptor tables, 28 timeouts, 11 others.
-- **Compute (88):** mostly descriptor chains reached through a runtime index or an address-loaded pointer.
+- **Pixel (3):** the last three shaders that throw. The classes this section used to list are gone in the 2026-11-22 rerun: no shader needs the barycentric extension or the f16 opt-in to validate, and the descriptor and sampler chains, the barycentric location limit and the clamped sampling all compile strict.
+- **Vertex (788):** computed `s_swappc` targets and fetch-shader calls with no parsed plan. Vertex layout comes from pipeline state, so most of these wait for the executable.
+- **Mesh (42):** 37 are per-lane sampler webs, of which one open PR covers 36; the other five (10264, 10267, 10268, 10451, 10452) compile at wave 32 and only throw at wave 64, a wave-size effect rather than a recompiler regression (`XBOX_WAVE=32` reproduces the old harness).
+- **Compute (10):** 6 time out and 4 throw.
 - **Everything the executable decides:** formats, blend and depth state, export mapping, descriptor contents. The harness uses defaults. No frame has been rendered.
 - **Ray tracing:** 62 of 64 shaders that use the hardware BVH instruction recompile, but nothing was traversed. The 8.3 GB BVH dump's bit layout is not decoded ([`BVH_CONTAINER.md`](docs/xbox/BVH_CONTAINER.md)).
 

@@ -478,7 +478,40 @@ def test_irreducible_loop_non_dominating_srt_descriptor():
         assert got_out == want_out, (c0, c1, c2, got_out[:4], want_out[:4])
         assert got_img == want_img, (c0, c1, c2, got_img[:4], want_img[:4])
 
-TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web, test_guarded_phi_image_table_dead_arm, test_irreducible_loop_non_dominating_srt_descriptor]
+def test_waterfall_wave64_over_buffer_loaded_index():
+    """Wave 64: the same program as test_waterfall_over_buffer_loaded_index, with a 64-lane permutation and the b64 forms of the
+    exec save and xor, so the waterfall resolves a per-lane descriptor index for the lanes above 31 too. Lane i uses index perm[i];
+    region FIRST + k must hold 1000 + i exactly for the lanes with perm[i] == k."""
+    count, size, idx = 4, 256, 1
+    perm = [(i * 7 + 3) % count for i in range(64)]
+    p = rdna_asm.Program()
+    p.smem('s_load_dwordx8', 8, 4, 0)
+    p.sopp('s_waitcnt', 0)
+    p.vop2('v_lshlrev_b32', 1, 2, 'v0')
+    p.mubuf('buffer_load_dword', 3, 1, 8, 128, 0)
+    p.sopp('s_waitcnt', 0)
+    p.vop2('v_add_nc_u32', 2, 1000, 'v0')
+    top = p.label()
+    p.vop1('v_readfirstlane_b32', 0, 'v3')
+    p.vopc('v_cmp_eq_u32', 's0', 'v3')
+    p.sop1('s_and_saveexec_b64', 28, rdna_asm.VCC_LO)
+    p.sop2('s_lshl_b32', 2, 's0', 4)
+    p.smem('s_load_dwordx4', 20, 12, 0, soffset='s2')
+    p.sopp('s_waitcnt', 0)
+    p.mubuf('buffer_store_dword', 2, 1, 20, 128, 0)
+    p.sop2('s_xor_b64', rdna_asm.EXEC_LO, rdna_asm.EXEC_LO, 's28')
+    p.branch_to('s_cbranch_execnz', top)
+    p.sopp('s_endpgm')
+    regions = {0: (256, None), idx: (256, struct.pack('<64I', *perm)), HEAP: (count * 16, None)}
+    regions.update({FIRST + i: (size, None) for i in range(count)})
+    pokes = T.vsharp(0, 0, idx, 256) + [f"ptrlo 0 16 {HEAP}", f"ptrhi 0 20 {HEAP} 0"] + _heap_lines(count, size)
+    r = T.run(p.bytes(), regions, pokes, wave=64)
+    for k in range(count):
+        got = struct.unpack('<64I', r[FIRST + k][:size])
+        want = tuple(1000 + i if perm[i] == k else 0 for i in range(64))
+        assert got == want, ("region", k, [(i, got[i], want[i]) for i in range(64) if got[i] != want[i]][:6])
+
+TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_waterfall_wave64_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web, test_guarded_phi_image_table_dead_arm, test_irreducible_loop_non_dominating_srt_descriptor]
 
 if __name__ == "__main__":
     bad = 0
