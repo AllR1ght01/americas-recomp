@@ -17,7 +17,8 @@ for f in sorted(glob.glob(os.path.join(src, "shader_*.ll"))):
     if r.returncode:
         res[n] = "intrinsics left: " + r.stdout.strip().split(": ", 1)[-1]
         continue
-    if "@dx.op.wave" in open(s_ll, encoding="utf-8").read():
+    lowered = open(s_ll, encoding="utf-8").read()
+    if "@dx.op.wave" in lowered or "@dx.op.createHandleFromHeap" in lowered:
         r = subprocess.run([sys.executable, "-I", os.path.join(here, "dxil_sm66_wave.py"), s_ll, w_ll, wave], capture_output=True, text=True)
         if r.returncode:
             res[n] = "sm66 rewrite failed: " + (r.stderr.strip().splitlines() or ["?"])[-1]
