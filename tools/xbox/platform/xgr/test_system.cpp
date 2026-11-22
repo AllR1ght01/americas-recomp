@@ -240,6 +240,7 @@ static void CheckFeatures() {
 }
 
 static void CheckActivation() {
+  int callsBefore = g_silent_calls;
   Api protocol = Get(kProtocol);
   CheckSilentEvent(protocol, 3, "XGameProtocolRegisterForActivation", 4, "XGameProtocolUnregisterForActivation");
   Api activation = Get(kActivation);
@@ -249,6 +250,16 @@ static void CheckActivation() {
   Api invite = Get(kInvite);
   CheckSilentEvent(invite, 3, "XGameInviteRegisterForEvent", 4, "XGameInviteUnregisterForEvent");
   CheckSilentEvent(invite, 5, "XGameInviteRegisterForPendingEvent", 6, "XGameInviteUnregisterForPendingEvent");
+  Check(g_silent_calls == callsBefore, "activation, protocol and invite registrations do not invoke the callback");
+  Token unknown{};
+  Check(protocol.At<UnregisterFn>(4, "XGameProtocolUnregisterForActivation")(protocol.self, unknown, FALSE),
+        "XGameProtocolUnregisterForActivation returns true for a token that was never registered");
+  Check(activation.At<UnregisterFn>(4, "XGameActivationUnregisterForEvent")(activation.self, unknown, FALSE),
+        "XGameActivationUnregisterForEvent returns true for a token that was never registered");
+  Check(invite.At<UnregisterFn>(4, "XGameInviteUnregisterForEvent")(invite.self, unknown, FALSE),
+        "XGameInviteUnregisterForEvent returns true for a token that was never registered");
+  Check(invite.At<UnregisterFn>(6, "XGameInviteUnregisterForPendingEvent")(invite.self, unknown, TRUE),
+        "XGameInviteUnregisterForPendingEvent returns true for a token that was never registered");
 }
 
 struct Blocking { HANDLE entered; HANDLE release; volatile LONG calls; };
