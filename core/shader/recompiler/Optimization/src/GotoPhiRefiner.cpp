@@ -1,6 +1,7 @@
 #include "Optimization/GotoPhiRefiner.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <tuple>
@@ -19,12 +20,39 @@ constexpr std::size_t None = static_cast<std::size_t>(-1);
 struct Fact {
     const IrValue* condition = nullptr;
     bool value = false;
+    std::size_t block = None;
 };
 
 struct Memo {
     IrValue* result = nullptr;
     std::vector<std::size_t> relied;
     bool done = false;
+};
+
+struct RefinedKey {
+    std::size_t factSet = 0;
+    const IrValue* value = nullptr;
+    bool operator==(const RefinedKey&) const = default;
+};
+
+struct RestrictedKey {
+    std::size_t factSet = 0;
+    const IrValue* phi = nullptr;
+    const IrValue* guard = nullptr;
+    bool expected = false;
+    bool operator==(const RestrictedKey&) const = default;
+};
+
+struct KeyHash {
+    static std::size_t Mix(std::size_t seed, std::size_t value) {
+        return seed ^ (value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2));
+    }
+    std::size_t operator()(const RefinedKey& key) const {
+        return Mix(std::hash<std::size_t>{}(key.factSet), std::hash<const IrValue*>{}(key.value));
+    }
+    std::size_t operator()(const RestrictedKey& key) const {
+        return Mix(Mix(Mix(std::hash<std::size_t>{}(key.factSet), std::hash<const IrValue*>{}(key.phi)), std::hash<const IrValue*>{}(key.guard)), key.expected ? 1u : 0u);
+    }
 };
 
 IrValue* Reuse(const Memo& memo, std::set<std::size_t>& relied, IrValue* pending) {
@@ -64,10 +92,22 @@ public:
 
     std::uint32_t Run() {
         if (m_program.BlockOrder().empty()) return 0;
-        m_order = ReversePostOrder(*m_program.BlockOrder().front());
-        for (std::size_t position = 0; position < m_order.size(); ++position) m_index[m_order[position]] = position;
-        ComputeDominators();
-        const auto facts = CollectFacts();
+        if (!m_prepared) {
+            m_order = ReversePostOrder(*m_program.BlockOrder().front());
+            for (std::size_t position = 0; position < m_order.size(); ++position) m_index[m_order[position]] = position;
+            m_successors.assign(m_order.size(), {});
+            for (std::size_t position = 0; position < m_order.size(); ++position) {
+                for (const IrBlock* successor : m_order[position]->Successors()) {
+                    if (const auto found = m_index.find(successor); found != m_index.end()) m_successors[position].push_back(found->second);
+                }
+            }
+            ComputeDominators();
+            m_facts = CollectFacts();
+            m_prepared = true;
+        }
+        m_refined.clear();
+        m_restricted.clear();
+        const auto& facts = m_facts;
         std::map<std::vector<std::pair<const IrValue*, bool>>, std::size_t> factSets;
         std::uint32_t replaced = 0;
         for (std::size_t position = 0; position < m_order.size(); ++position) {
@@ -140,6 +180,12 @@ private:
         }
     }
 
+    std::size_t BlockOf(const IrValue* value) const {
+        if (value->Parent() == nullptr) return None;
+        const auto found = m_index.find(value->Parent());
+        return found == m_index.end() ? None : found->second;
+    }
+
     bool Dominates(std::size_t dominator, std::size_t block) const {
         return m_enter[dominator] <= m_enter[block] && m_leave[block] <= m_leave[dominator];
     }
@@ -152,11 +198,10 @@ private:
         while (!pending.empty()) {
             const auto current = pending.back();
             pending.pop_back();
-            for (const IrBlock* successor : m_order[current]->Successors()) {
-                const auto found = m_index.find(successor);
-                if (found == m_index.end() || found->second == barrier || found->second == from || reached[found->second]) continue;
-                reached[found->second] = true;
-                pending.push_back(found->second);
+            for (const std::size_t next : m_successors[current]) {
+                if (next == barrier || next == from || reached[next]) continue;
+                reached[next] = true;
+                pending.push_back(next);
             }
         }
         return m_reachable.emplace(key, std::move(reached)).first->second;
@@ -183,7 +228,7 @@ private:
         };
         const auto addFact = [&](std::size_t position, const IrValue* condition, bool value) {
             if (hasFact(position, condition, value) || hasFact(position, condition, !value)) return false;
-            facts[position].push_back(Fact{condition, value});
+            facts[position].push_back(Fact{condition, value, BlockOf(condition)});
             return true;
         };
         std::vector<GuardEdge> guards;
@@ -261,10 +306,8 @@ private:
                     const auto& predFacts = facts[pred->second];
                     for (std::size_t fi = predFacts.size(); fi-- > 0u;) {
                         const auto& predFact = predFacts[fi];
-                        const IrBlock* factParent = predFact.condition->Parent();
-                        const auto factBlock = factParent != nullptr ? m_index.find(factParent) : m_index.end();
-                        if (factBlock == m_index.end() || factBlock->second == targetBlock->second || Dominates(factBlock->second, targetBlock->second)) continue;
-                        if (factBlock->second != pred->second && ReachableAvoiding(factBlock->second, pred->second)[targetBlock->second]) continue;
+                        if (predFact.block == None || predFact.block == targetBlock->second || Dominates(predFact.block, targetBlock->second)) continue;
+                        if (predFact.block != pred->second && ReachableAvoiding(predFact.block, pred->second)[targetBlock->second]) continue;
                         if (self(self, predFact.condition, predFact.value, targetCond, targetVal, visiting, budget)) {
                             proven = true;
                             break;
@@ -351,13 +394,13 @@ private:
     IrValue* RefineValue(IrValue* value, const std::vector<Fact>& facts, std::size_t factSet, std::set<std::size_t>& relied, std::size_t depth) {
         value = value->Resolve();
         if (!value->IsPhi() || depth > MaxRefinementDepth) return value;
-        const auto [entry, inserted] = m_refined.try_emplace({factSet, value});
+        const auto [entry, inserted] = m_refined.try_emplace(RefinedKey{factSet, value});
         if (!inserted) return Reuse(entry->second, relied, value);
         IrValue* result = value;
         std::set<std::size_t> own;
         if (const auto block = m_index.find(value->Parent()); block != m_index.end()) {
             for (const auto& fact : facts) {
-                if (fact.condition == value || fact.condition->Parent() != value->Parent()) continue;
+                if (fact.condition == value || fact.block != block->second) continue;
                 std::set<std::size_t> attempt;
                 if (IrValue* restricted = Restrict(*value, *fact.condition, fact.value, facts, factSet, attempt, depth + 1u)) {
                     attempt.insert(block->second);
@@ -368,9 +411,7 @@ private:
             }
             if (result == value) {
                 for (const auto& fact : facts) {
-                    if (fact.condition == value || fact.condition->Parent() == value->Parent() || fact.condition->Parent() == nullptr) continue;
-                    const auto condBlock = m_index.find(fact.condition->Parent());
-                    if (condBlock == m_index.end() || !Dominates(condBlock->second, block->second)) continue;
+                    if (fact.condition == value || fact.block == block->second || fact.block == None || !Dominates(fact.block, block->second)) continue;
                     std::set<std::size_t> attempt;
                     IrValue* single = nullptr;
                     bool excludedAny = false;
@@ -401,7 +442,7 @@ private:
                     }
                     if (ok && excludedAny && single != nullptr) {
                         attempt.insert(block->second);
-                        attempt.insert(condBlock->second);
+                        attempt.insert(fact.block);
                         result = RefineValue(single, facts, factSet, attempt, depth + 1u);
                         own = std::move(attempt);
                         break;
@@ -416,7 +457,7 @@ private:
 
     IrValue* Restrict(const IrValue& phi, const IrValue& guardPhi, bool expected, const std::vector<Fact>& facts, std::size_t factSet, std::set<std::size_t>& relied, std::size_t depth) {
         if (depth > MaxRefinementDepth) return nullptr;
-        const auto [entry, inserted] = m_restricted.try_emplace({factSet, &phi, &guardPhi, expected});
+        const auto [entry, inserted] = m_restricted.try_emplace(RestrictedKey{factSet, &phi, &guardPhi, expected});
         if (!inserted) return Reuse(entry->second, relied, nullptr);
         std::set<std::size_t> own;
         IrValue* single = RestrictArms(phi, guardPhi, expected, facts, factSet, own, depth);
@@ -471,21 +512,25 @@ private:
     IrProgram& m_program;
     std::vector<IrBlock*> m_order;
     std::unordered_map<const IrBlock*, std::size_t> m_index;
+    std::vector<std::vector<std::size_t>> m_successors;
+    std::vector<std::vector<Fact>> m_facts;
+    bool m_prepared = false;
     std::unordered_map<const IrBlock*, BranchInfo> m_branches;
     std::vector<std::size_t> m_dominator;
     std::vector<std::size_t> m_enter;
     std::vector<std::size_t> m_leave;
     std::map<std::pair<std::size_t, std::size_t>, std::vector<bool>> m_reachable;
-    std::map<std::pair<std::size_t, const IrValue*>, Memo> m_refined;
-    std::map<std::tuple<std::size_t, const IrValue*, const IrValue*, bool>, Memo> m_restricted;
+    std::unordered_map<RefinedKey, Memo, KeyHash> m_refined;
+    std::unordered_map<RestrictedKey, Memo, KeyHash> m_restricted;
 };
 
 }
 
 GotoPhiRefinementStats GotoPhiRefiner::Refine(IrProgram& program) const {
     GotoPhiRefinementStats stats;
+    Refinement refinement(program);
     for (std::size_t round = 0; round < MaxRefinementRounds; ++round) {
-        const std::uint32_t replaced = Refinement(program).Run();
+        const std::uint32_t replaced = refinement.Run();
         if (replaced == 0u) break;
         stats.replacedOperands += replaced;
     }
