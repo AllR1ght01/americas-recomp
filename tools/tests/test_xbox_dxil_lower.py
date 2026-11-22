@@ -1,6 +1,8 @@
 import importlib.util
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,6 +33,38 @@ def module(declarations):
         '',
     ])
     return "\n".join(lines)
+
+
+class XboxDxilLowerCliTests(unittest.TestCase):
+    def run_cli(self, source):
+        with tempfile.TemporaryDirectory(prefix="dxil_cli_") as td:
+            src = Path(td) / "input.ll"
+            dst = Path(td) / "output.ll"
+            src.write_text(source, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(TOOLS / "xbox" / "platform" / "xbox_dxil_lower.py"), str(src), str(dst)],
+                capture_output=True, text=True, timeout=30,
+            )
+            return result, dst.read_text(encoding="utf-8")
+
+    def test_unknown_intrinsic_returns_failure_and_preserves_input(self):
+        source = module(['declare i32 @xbox.Med3_U32(i32, i32, i32, i32) #0'])
+        source = source.replace("xbox.Med3_U32", "xbox.synthetic_never_lowered")
+        result, output = self.run_cli(source)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("xbox.synthetic_never_lowered", result.stdout)
+        self.assertIn("lowered 0 call(s)", result.stdout)
+        self.assertIn("call i32 @xbox.synthetic_never_lowered(", output)
+        self.assertIn("declare i32 @xbox.synthetic_never_lowered(", output)
+
+    def test_supported_intrinsic_returns_success(self):
+        source = module(['declare i32 @xbox.Med3_U32(i32, i32, i32, i32) #0'])
+        result, output = self.run_cli(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("lowered 1 call(s)", result.stdout)
+        self.assertIn("intrinsics still called: none", result.stdout)
+        self.assertNotIn("@xbox.", output)
+        self.assertIn("@dx.op.binary.i32(", output)
 
 
 class XboxDxilLowerDeclarationTests(unittest.TestCase):
