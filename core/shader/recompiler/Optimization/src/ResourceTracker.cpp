@@ -174,6 +174,7 @@ public:
         if (!m_program.Resources().srtPlanComplete) {
             fail("SRT plan is not ready");
         }
+        PruneStructurizedDescriptorPhis();
         SplitDescriptorPhis();
         if (m_foldedWeb) {
             DeadCodeEliminator{}.Eliminate(m_program);
@@ -2206,6 +2207,347 @@ private:
     std::string SplitFailure(const IrValue& handle) const {
         const auto found = m_splitFailures.find(&handle);
         return found == m_splitFailures.end() ? std::string() : "; descriptor web: " + found->second;
+    }
+
+    static bool IsFlatSrtRead(const IrValue* value) {
+        if (value == nullptr) return false;
+        value = value->Resolve();
+        if (value->Opcode() != IrOpcode::ReadConst || value->ArgumentCount() != 2u) return false;
+        const IrValue* resource = value->Argument(0)->Resolve();
+        const IrValue* slot = value->Argument(1)->Resolve();
+        return resource->Opcode() == IrOpcode::GetSrtResource && slot->HasImmediate() && slot->Type() == IrType::U32;
+    }
+
+    void PruneStructurizedDescriptorPhis() {
+        const auto& blocks = m_program.BlockOrder();
+        const auto& info = m_program.Metadata().blockInfo;
+        if (blocks.empty() || blocks.size() != info.size()) {
+            return;
+        }
+        std::vector<IrValue*> handles;
+        std::unordered_map<const IrBlock*, bool> constBoolPhiBlock;
+        const auto hasConstBoolPhi = [&](const IrBlock* phiBlock) -> bool {
+            if (phiBlock == nullptr || phiBlock->Predecessors().size() < 2u) return false;
+            if (const auto it = constBoolPhiBlock.find(phiBlock); it != constBoolPhiBlock.end()) {
+                return it->second;
+            }
+            bool found = false;
+            for (const IrValue* phi : phiBlock->Instructions()) {
+                if (!phi->IsPhi()) break;
+                if (phi->Type() != IrType::Bool) continue;
+                for (std::size_t edge = 0; edge < phi->ArgumentCount(); ++edge) {
+                    const IrValue* in = phi->Argument(edge)->Resolve();
+                    if (in->HasImmediate() && in->Type() == IrType::Bool) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+            constBoolPhiBlock.emplace(phiBlock, found);
+            return found;
+        };
+        for (IrBlock* block : blocks) {
+            for (IrValue* inst : block->Instructions()) {
+                if (!Detail::IsDescriptorHandle(inst->Opcode())) continue;
+                bool hasCandidate = false;
+                for (std::size_t arg = 0; arg < inst->ArgumentCount(); ++arg) {
+                    IrValue* value = inst->Argument(arg)->Resolve();
+                    if (value->IsPhi() && hasConstBoolPhi(value->Parent())) {
+                        hasCandidate = true;
+                        break;
+                    }
+                }
+                if (hasCandidate) {
+                    handles.push_back(inst);
+                }
+            }
+        }
+        if (handles.empty()) {
+            return;
+        }
+
+        std::vector<IrBlock*> rpo;
+        std::unordered_map<const IrBlock*, std::size_t> rpoIndex;
+        {
+            std::unordered_set<const IrBlock*> visited;
+            std::vector<std::pair<IrBlock*, std::size_t>> stack{{blocks.front(), 0u}};
+            visited.insert(blocks.front());
+            while (!stack.empty()) {
+                auto& [current, next] = stack.back();
+                if (next < current->Successors().size()) {
+                    IrBlock* succ = current->Successors()[next++];
+                    if (visited.insert(succ).second) stack.emplace_back(succ, 0u);
+                    continue;
+                }
+                rpo.push_back(current);
+                stack.pop_back();
+            }
+            std::reverse(rpo.begin(), rpo.end());
+            for (std::size_t i = 0; i < rpo.size(); ++i) rpoIndex.emplace(rpo[i], i);
+        }
+        constexpr std::size_t noDom = static_cast<std::size_t>(-1);
+        std::vector<std::size_t> idom(rpo.size(), noDom);
+        idom[0] = 0u;
+        const auto intersect = [&](std::size_t left, std::size_t right) {
+            while (left != right) {
+                while (left > right) left = idom[left];
+                while (right > left) right = idom[right];
+            }
+            return left;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (std::size_t pos = 1; pos < rpo.size(); ++pos) {
+                std::size_t candidate = noDom;
+                for (const IrBlock* pred : rpo[pos]->Predecessors()) {
+                    const auto found = rpoIndex.find(pred);
+                    if (found == rpoIndex.end() || idom[found->second] == noDom) continue;
+                    candidate = candidate == noDom ? found->second : intersect(candidate, found->second);
+                }
+                if (candidate != idom[pos]) {
+                    idom[pos] = candidate;
+                    changed = true;
+                }
+            }
+        }
+        std::vector<std::vector<std::size_t>> domChildren(rpo.size());
+        for (std::size_t pos = 1; pos < rpo.size(); ++pos) {
+            if (idom[pos] != noDom) domChildren[idom[pos]].push_back(pos);
+        }
+        std::vector<std::size_t> domEnter(rpo.size(), 0u);
+        std::vector<std::size_t> domLeave(rpo.size(), 0u);
+        {
+            std::size_t clock = 0;
+            std::vector<std::pair<std::size_t, std::size_t>> dfs{{0u, 0u}};
+            domEnter[0] = clock++;
+            while (!dfs.empty()) {
+                auto& [node, next] = dfs.back();
+                if (next < domChildren[node].size()) {
+                    const std::size_t child = domChildren[node][next++];
+                    domEnter[child] = clock++;
+                    dfs.emplace_back(child, 0u);
+                    continue;
+                }
+                domLeave[node] = clock++;
+                dfs.pop_back();
+            }
+        }
+        const auto domIndex = [&](std::size_t a, std::size_t b) {
+            return domEnter[a] <= domEnter[b] && domLeave[b] <= domLeave[a];
+        };
+
+        std::unordered_map<std::uint32_t, std::size_t> idToRpo;
+        std::vector<std::size_t> rpoToInfo(rpo.size(), noDom);
+        std::unordered_map<const IrValue*, std::vector<std::size_t>> condUsers;
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            const auto found = rpoIndex.find(blocks[i]);
+            if (found == rpoIndex.end()) continue;
+            idToRpo.emplace(info[i].id, found->second);
+            rpoToInfo[found->second] = i;
+            if (info[i].terminator.kind == TerminatorKind::ConditionalBranch && info[i].condition != nullptr) {
+                condUsers[info[i].condition->Resolve()].push_back(found->second);
+            }
+        }
+
+        std::map<std::pair<std::size_t, std::size_t>, std::vector<bool>> reachCache;
+        const auto edgeReachable = [&](std::size_t phiPos, std::size_t predPos) -> const std::vector<bool>& {
+            const auto key = std::pair{phiPos, predPos};
+            if (const auto found = reachCache.find(key); found != reachCache.end()) {
+                return found->second;
+            }
+            constexpr std::uint8_t kUnreached = 0u;
+            constexpr std::uint8_t kFalse = 1u;
+            constexpr std::uint8_t kTrue = 2u;
+            constexpr std::uint8_t kTop = 3u;
+            std::vector<bool> reached(rpo.size(), false);
+            std::unordered_set<std::uint64_t> edgeReached;
+            std::unordered_map<const IrValue*, std::uint8_t> boolVals;
+            std::vector<std::size_t> worklist;
+            std::vector<bool> inWorklist(rpo.size(), false);
+            const auto enqueue = [&](std::size_t pos) {
+                if (!inWorklist[pos]) {
+                    inWorklist[pos] = true;
+                    worklist.push_back(pos);
+                }
+            };
+            const auto evalBool = [&](const IrValue* v) -> std::uint8_t {
+                v = v->Resolve();
+                if (v->HasImmediate() && v->Type() == IrType::Bool) {
+                    return v->ImmediateBool() ? kTrue : kFalse;
+                }
+                if (const auto it = boolVals.find(v); it != boolVals.end()) {
+                    return it->second;
+                }
+                return kTop;
+            };
+            const auto notifyUsers = [&](const IrValue* inst) {
+                for (const IrValue* user : inst->Uses()) {
+                    if (user->Parent() == nullptr) continue;
+                    const auto uIt = rpoIndex.find(user->Parent());
+                    if (uIt != rpoIndex.end() && reached[uIt->second]) {
+                        enqueue(uIt->second);
+                    }
+                }
+                if (const auto cIt = condUsers.find(inst); cIt != condUsers.end()) {
+                    for (const std::size_t brPos : cIt->second) {
+                        if (reached[brPos]) enqueue(brPos);
+                    }
+                }
+            };
+
+            const IrBlock* phiBlock = rpo[phiPos];
+            const IrBlock* predBlock = rpo[predPos];
+            reached[phiPos] = true;
+            for (const IrValue* inst : phiBlock->Instructions()) {
+                if (!inst->IsPhi()) break;
+                if (inst->Type() != IrType::Bool) continue;
+                const IrValue* in = PhiIncoming(*inst, predBlock);
+                if (in != nullptr) {
+                    in = in->Resolve();
+                    if (in->HasImmediate() && in->Type() == IrType::Bool) {
+                        boolVals[inst] = in->ImmediateBool() ? kTrue : kFalse;
+                        continue;
+                    }
+                }
+                boolVals[inst] = kTop;
+            }
+            enqueue(phiPos);
+            std::size_t head = 0;
+            while (head < worklist.size()) {
+                const std::size_t uPos = worklist[head++];
+                inWorklist[uPos] = false;
+                const IrBlock* u = rpo[uPos];
+                for (const IrValue* inst : u->Instructions()) {
+                    if (inst->IsPhi()) {
+                        if (uPos == phiPos || inst->Type() != IrType::Bool) continue;
+                        std::uint8_t joined = kUnreached;
+                        for (std::size_t i = 0; i < inst->ArgumentCount(); ++i) {
+                            const auto pIt = rpoIndex.find(inst->PhiBlock(i));
+                            if (pIt == rpoIndex.end()) continue;
+                            const std::uint64_t eKey = (static_cast<std::uint64_t>(pIt->second) << 32u) | static_cast<std::uint64_t>(uPos);
+                            if (edgeReached.contains(eKey)) {
+                                joined |= evalBool(inst->Argument(i));
+                            }
+                        }
+                        if (joined == kUnreached) continue;
+                        const auto it = boolVals.find(inst);
+                        const std::uint8_t prev = it == boolVals.end() ? kUnreached : it->second;
+                        const std::uint8_t next = static_cast<std::uint8_t>(prev | joined);
+                        if (next != prev) {
+                            boolVals[inst] = next;
+                            notifyUsers(inst);
+                        }
+                        continue;
+                    }
+                    if (inst->Type() != IrType::Bool) continue;
+                    std::uint8_t val = kTop;
+                    const auto op = inst->Opcode();
+                    if (op == IrOpcode::LogicalNot && inst->ArgumentCount() == 1u) {
+                        const std::uint8_t va = evalBool(inst->Argument(0));
+                        val = va == kFalse ? kTrue : va == kTrue ? kFalse : va;
+                    } else if (op == IrOpcode::LogicalAnd && inst->ArgumentCount() == 2u) {
+                        const std::uint8_t va = evalBool(inst->Argument(0));
+                        const std::uint8_t vb = evalBool(inst->Argument(1));
+                        val = (va == kFalse || vb == kFalse) ? kFalse : (va == kTrue && vb == kTrue) ? kTrue : (va == kUnreached || vb == kUnreached) ? kUnreached : kTop;
+                    } else if (op == IrOpcode::LogicalOr && inst->ArgumentCount() == 2u) {
+                        const std::uint8_t va = evalBool(inst->Argument(0));
+                        const std::uint8_t vb = evalBool(inst->Argument(1));
+                        val = (va == kTrue || vb == kTrue) ? kTrue : (va == kFalse && vb == kFalse) ? kFalse : (va == kUnreached || vb == kUnreached) ? kUnreached : kTop;
+                    } else if (op == IrOpcode::SelectU1 && inst->ArgumentCount() == 3u) {
+                        const std::uint8_t vc = evalBool(inst->Argument(0));
+                        const std::uint8_t vt = evalBool(inst->Argument(1));
+                        const std::uint8_t vf = evalBool(inst->Argument(2));
+                        val = vc == kTrue ? vt : vc == kFalse ? vf : vc == kTop ? static_cast<std::uint8_t>(vt | vf) : kUnreached;
+                    }
+                    const auto it = boolVals.find(inst);
+                    const std::uint8_t prev = it == boolVals.end() ? kUnreached : it->second;
+                    const std::uint8_t next = static_cast<std::uint8_t>(prev | val);
+                    if (next != prev) {
+                        boolVals[inst] = next;
+                        notifyUsers(inst);
+                    }
+                }
+                const auto addEdge = [&](std::size_t vPos) {
+                    if (vPos == phiPos || !domIndex(phiPos, vPos)) return;
+                    const std::uint64_t eKey = (static_cast<std::uint64_t>(uPos) << 32u) | static_cast<std::uint64_t>(vPos);
+                    if (edgeReached.insert(eKey).second) {
+                        reached[vPos] = true;
+                        enqueue(vPos);
+                    }
+                };
+                bool handled = false;
+                if (rpoToInfo[uPos] != noDom) {
+                    const auto& bi = info[rpoToInfo[uPos]];
+                    if (bi.terminator.kind == TerminatorKind::ConditionalBranch && bi.condition != nullptr) {
+                        const auto tIt = idToRpo.find(bi.terminator.trueBlock);
+                        const auto fIt = idToRpo.find(bi.terminator.falseBlock);
+                        if (tIt != idToRpo.end() && fIt != idToRpo.end()) {
+                            const std::uint8_t vc = evalBool(bi.condition);
+                            if ((vc & kTrue) != 0u) addEdge(tIt->second);
+                            if ((vc & kFalse) != 0u) addEdge(fIt->second);
+                            handled = true;
+                        }
+                    }
+                }
+                if (!handled) {
+                    for (const IrBlock* succ : u->Successors()) {
+                        if (const auto sIt = rpoIndex.find(succ); sIt != rpoIndex.end()) {
+                            addEdge(sIt->second);
+                        }
+                    }
+                }
+            }
+            return reachCache.emplace(key, std::move(reached)).first->second;
+        };
+
+        for (IrValue* handle : handles) {
+            if (handle->Parent() == nullptr) continue;
+            const auto useIt = rpoIndex.find(handle->Parent());
+            if (useIt == rpoIndex.end()) continue;
+            const std::size_t usePos = useIt->second;
+            for (std::size_t arg = 0; arg < handle->ArgumentCount(); ++arg) {
+                IrValue* current = handle->Argument(arg)->Resolve();
+                bool narrowed = false;
+                std::size_t prevPhiPos = noDom;
+                for (std::uint32_t step = 0; step < 8u && current->IsPhi() && current->Parent() != nullptr; ++step) {
+                    const auto phiIt = rpoIndex.find(current->Parent());
+                    if (phiIt == rpoIndex.end()) break;
+                    const std::size_t phiPos = phiIt->second;
+                    if (prevPhiPos == noDom ? !domIndex(phiPos, usePos) : (phiPos == prevPhiPos || !domIndex(phiPos, prevPhiPos))) break;
+                    if (!hasConstBoolPhi(current->Parent())) break;
+                    IrValue* sole = nullptr;
+                    std::size_t liveCount = 0;
+                    for (std::size_t edge = 0; edge < current->ArgumentCount(); ++edge) {
+                        const auto predIt = rpoIndex.find(current->PhiBlock(edge));
+                        if (predIt == rpoIndex.end()) {
+                            liveCount = 2u;
+                            break;
+                        }
+                        if (edgeReachable(phiPos, predIt->second)[usePos]) {
+                            sole = current->Argument(edge)->Resolve();
+                            ++liveCount;
+                            if (liveCount > 1u) break;
+                        }
+                    }
+                    if (liveCount != 1u || sole == nullptr) break;
+                    current = sole;
+                    prevPhiPos = phiPos;
+                    narrowed = true;
+                }
+                if (!narrowed) continue;
+                if (current->HasImmediate() || AvailableBefore(*current, *handle)) {
+                    handle->ReplaceArgument(arg, current);
+                    m_foldedWeb = true;
+                } else if (IsFlatSrtRead(current)) {
+                    IrValue* srt = EmitBefore(*handle, IrOpcode::GetSrtResource, IrType::SrtResource, {});
+                    const std::array<IrValue*, 2> readArgs{srt, current->Argument(1)->Resolve()};
+                    IrValue* cloned = EmitBefore(*handle, IrOpcode::ReadConst, IrType::U32, readArgs);
+                    handle->ReplaceArgument(arg, cloned);
+                    m_foldedWeb = true;
+                }
+            }
+        }
     }
 
     void SplitDescriptorPhis() {
