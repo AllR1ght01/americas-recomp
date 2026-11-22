@@ -409,7 +409,76 @@ def test_guarded_phi_image_table_dead_arm():
         got = struct.unpack('<32I', r[FIRST][:128])
         assert got == (want_val,) * 32, (sel0, sel1, got[:4], want_val)
 
-TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web, test_guarded_phi_image_table_dead_arm]
+def test_irreducible_loop_non_dominating_srt_descriptor():
+    """SRT: control buffer V# at 0, output buffer V# at 32, R32_UINT storage image T# at 64.
+    An irreducible loop enters from two paths; the SRT image descriptor load does not dominate
+    the image_atomic_umax after the loop, but every CFG path from the Phi to the atomic passes
+    through the load."""
+    cases = (
+        ((0, 0, 99), (7,) * 32, (50,) * 32),
+        ((1, 1, 1), (9,) * 32, (50,) * 32),
+        ((1, 0, 99), tuple(51 + lane for lane in range(32)), tuple(51 + lane for lane in range(32))),
+    )
+    for (c0, c1, c2), want_out, want_img in cases:
+        p = rdna_asm.Program()
+        p.smem('s_load_dwordx4', 8, 4, 0)
+        p.smem('s_load_dwordx4', 24, 4, 32)
+        p.sopp('s_waitcnt', 0)
+        p.vop2('v_and_b32', 6, 0, 'v0')
+        p.vop1('v_readfirstlane_b32', 12, 'v6')
+        p.sop2('s_lshl_b32', 12, 's12', 2)
+        p.smem('s_buffer_load_dword', 2, 8, 0, soffset='s12')
+        p.smem('s_buffer_load_dword', 3, 8, 4, soffset='s12')
+        p.smem('s_buffer_load_dword', 6, 8, 8, soffset='s12')
+        p.sopp('s_waitcnt', 0)
+        p.sop1('s_mov_b32', 16, rdna_asm.EXEC_LO)
+        for r in range(17, 24):
+            p.sop1('s_mov_b32', r, 0)
+        p.sop1('s_mov_b32', 7, 0)
+        p.sopc('s_cmp_eq_u32', 's2', 0)
+        to_end1 = p.branch_fwd('s_cbranch_scc1')
+        p.smem('s_load_dwordx8', 16, 4, 64)
+        p.sopp('s_waitcnt', 0)
+        p.sopc('s_cmp_eq_u32', 's3', 0)
+        to_mid = p.branch_fwd('s_cbranch_scc1')
+        loop_top = p.label()
+        p.sop2('s_add_u32', 7, 's7', 1)
+        p.sopc('s_cmp_eq_u32', 's7', 's6')
+        to_end2 = p.branch_fwd('s_cbranch_scc1')
+        p.patch_to_here(to_mid)
+        p.sop2('s_add_u32', 7, 's7', 2)
+        p.sopc('s_cmp_lt_u32', 's7', 8)
+        p.branch_to('s_cbranch_scc1', loop_top)
+        p.vop1('v_mov_b32', 1, 'v0')
+        p.vop1('v_mov_b32', 2, 0)
+        p.vop2('v_add_nc_u32', 4, 51, 'v0')
+        p.mimg('image_atomic_umax', 4, 1, 16, dmask=1)
+        p.sopp('s_waitcnt', 0)
+        p.vop2('v_lshlrev_b32', 5, 2, 'v0')
+        p.mubuf('buffer_store_dword', 4, 5, 24, 128, 0)
+        to_done1 = p.branch_fwd('s_branch')
+        p.patch_to_here(to_end2)
+        p.vop1('v_mov_b32', 4, 9)
+        p.vop2('v_lshlrev_b32', 5, 2, 'v0')
+        p.mubuf('buffer_store_dword', 4, 5, 24, 128, 0)
+        to_done2 = p.branch_fwd('s_branch')
+        p.patch_to_here(to_end1)
+        p.vop1('v_mov_b32', 4, 7)
+        p.vop2('v_lshlrev_b32', 5, 2, 'v0')
+        p.mubuf('buffer_store_dword', 4, 5, 24, 128, 0)
+        p.patch_to_here(to_done1)
+        p.patch_to_here(to_done2)
+        p.sopp('s_endpgm')
+        ctrl = struct.pack('<4I', c0, c1, c2, 0)
+        extra = ["image 1 32 1 format 20 clear 50 0 0 0", "timg 0 64 1"]
+        pokes = T.vsharp(0, 0, 1, 16) + T.vsharp(0, 32, FIRST, 128)
+        r = T.run(p.bytes(), {0: (256, None), 1: (16, ctrl), FIRST: (128, None)}, pokes, extra=extra)
+        got_out = struct.unpack('<32I', r[FIRST][:128])
+        got_img = struct.unpack('<32I', open(os.path.join(r['out'], "image1.bin"), 'rb').read())
+        assert got_out == want_out, (c0, c1, c2, got_out[:4], want_out[:4])
+        assert got_img == want_img, (c0, c1, c2, got_img[:4], want_img[:4])
+
+TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web, test_guarded_phi_image_table_dead_arm, test_irreducible_loop_non_dominating_srt_descriptor]
 
 if __name__ == "__main__":
     bad = 0
