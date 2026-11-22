@@ -483,7 +483,7 @@ bool isFetchCall(const RdnaProgram& program, std::uint32_t index, const SwappcIn
     const std::uint32_t targetRegister = scalarIndex(instruction.source0);
     const bool userDataPair = swappc != nullptr && targetRegister != NoScalarRegister &&
         targetRegister >= swappc->userDataBaseRegister && targetRegister + 1u < swappc->userDataBaseRegister + swappc->userDataCount &&
-        std::none_of(program.instructions.begin(), GcnGuestShaders() ? program.instructions.begin() + index : program.instructions.end(), [&](const RdnaInstruction& other) {
+        std::none_of(program.instructions.begin(), program.instructions.begin() + index + 1, [&](const RdnaInstruction& other) {
             // XBOX-FORK: `s_swappc_b64 sN, sN` reads its target before it writes the link, so the call's own link write does not make the target pair computed.
             if (&other == &instruction) return false;
             return writesScalar(other, targetRegister) || writesScalar(other, targetRegister + 1u);
@@ -719,10 +719,9 @@ struct LinkEscape {
 
 template <typename TError>
 LinkEscape requireReturnAddressesStayInCalls(const RdnaProgram& program, const std::vector<SwappcCall>& calls, const std::vector<std::uint32_t>& unlinked, std::uint32_t knownWaveSize, const TError& escapeError) {
-    const bool gcn = GcnGuestShaders();
     std::set<std::uint32_t> links;
     for (const auto& call : calls) {
-        if (!call.fetch || gcn) links.insert(call.linkRegister);
+        links.insert(call.linkRegister);
     }
     const auto size = static_cast<std::uint32_t>(program.instructions.size());
     const auto successors = [&](std::uint32_t index) {
@@ -781,7 +780,7 @@ LinkEscape requireReturnAddressesStayInCalls(const RdnaProgram& program, const s
                 if (holds[index] == 0u || writesLink(index) || instruction.family == RdnaInstructionFamily::SOPC || findReturnAt(calls, index) != nullptr) continue;
                 const bool inside = std::ranges::any_of(calls, [&](const SwappcCall& call) { return !call.fetch && call.linkRegister == link && index >= call.targetIndex && index <= call.returnIndex; });
                 if (inside || !(((holds[index] & 1u) != 0u && readsScalarDword(instruction, link, waveSize)) || ((holds[index] & 2u) != 0u && readsScalarDword(instruction, link + 1u, waveSize)))) continue;
-                const auto owner = std::ranges::find_if(calls, [&](const SwappcCall& call) { return (!call.fetch || gcn) && call.linkRegister == link; });
+                const auto owner = std::ranges::find_if(calls, [&](const SwappcCall& call) { return call.linkRegister == link; });
                 return escapeError(*owner, instruction);
             }
         }
@@ -902,7 +901,7 @@ std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const Swa
                 continue;
             }
             const bool outsideRegion = regionEnd != InvalidControlFlowId && (index < call.targetIndex || index > regionEnd);
-            if (outsideRegion || (call.fetch && GcnGuestShaders())) continue;
+            if (outsideRegion || call.fetch) continue;
             if (touchesLinkRegister(instruction, call.linkRegister)) {
                 throw escapeError(call, instruction);
             }

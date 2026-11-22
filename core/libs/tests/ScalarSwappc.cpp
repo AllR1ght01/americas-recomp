@@ -123,6 +123,14 @@ static void CheckFetchCallAtEntry() {
     const auto cfg = Build(program, &info);
     Require(cfg.hasFetchCall);
     Require(cfg.fetchCallProgramCounter == 0x04u);
+
+    const auto reused = Build(Program({
+        Sop1(0x00u, 16u, 0x21u, 16u),
+        Sop1(0x04u, 16u, 0x04u, 18u),
+        Sopp(0x08u, 0x01u),
+    }), &info);
+    Require(reused.hasFetchCall);
+    Require(reused.fetchCallProgramCounter == 0x00u);
 }
 
 static void CheckThrows() {
@@ -196,6 +204,28 @@ static void CheckThrows() {
         Build(Program({
             Sopp(0x00u, 0x00u),
             Sop1(0x04u, 2u, 0x21u, 4u),
+            Sopp(0x08u, 0x01u),
+        }), &info);
+    });
+    ExpectThrow("computed/data-dependent s_swappc_b64", [] {
+        SwappcInfo info;
+        info.fetchCallAllowed = true;
+        info.userDataBaseRegister = 16u;
+        info.userDataCount = 8u;
+        Build(Program({
+            Sop1(0x00u, 16u, 0x04u, 18u),
+            Sop1(0x04u, 2u, 0x21u, 16u),
+            Sopp(0x08u, 0x01u),
+        }), &info);
+    });
+    ExpectThrow("escapes the constant-offset call/return model", [] {
+        SwappcInfo info;
+        info.fetchCallAllowed = true;
+        info.userDataBaseRegister = 16u;
+        info.userDataCount = 8u;
+        Build(Program({
+            Sop1(0x00u, 2u, 0x21u, 16u),
+            Sop1(0x04u, 4u, 0x04u, 2u),
             Sopp(0x08u, 0x01u),
         }), &info);
     });

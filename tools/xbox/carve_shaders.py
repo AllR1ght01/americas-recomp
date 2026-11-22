@@ -19,7 +19,9 @@ constant pools follow the last ``s_endpgm``; both are removed here so the result
 ``DXIL`` chunk.
 
 Writes ``<out>/bins/<idx>.bin`` and ``<out>/manifest.csv`` and needs nothing but the
-archive: no table of contents, no decoder, no game executable.
+archive: no table of contents, no decoder, no game executable. For each vertex shader with an
+input table in its FSSM header it also writes ``<out>/vin/<idx>.vin`` (``fssm_header.vin_text``),
+the VGPRs the runtime-built fetch subroutine fills; ``driver`` takes it as the ``vs`` input layout.
 """
 
 import argparse
@@ -29,7 +31,11 @@ import mmap
 import os
 import re
 import struct
+import sys
 import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fssm_header import vin_text
 
 SUFFIX = b"_Wrapped\x00"
 PAYLOAD_OFFSET = 26
@@ -52,6 +58,7 @@ CHUNK_LIMIT = 1 << 24
 READ_LIMIT = 1 << 22
 NAME = re.compile(rb"[A-Za-z0-9_.:]+$")
 MANAGED = re.compile(r"[0-9]+\.bin")
+MANAGED_VIN = re.compile(r"[0-9]+\.vin")
 FIELDS = ["idx", "name", "kind", "stage", "bytes", "prologue", "error"]
 
 
@@ -160,6 +167,7 @@ def carve_one(name, offset, archive):
         "kind": kind,
         "code": trim_at_endpgm(code),
         "prologue": prologue,
+        "vin": vin_text(blob) if STAGES.get(kind) == "VS" else "",
         "error": None,
     }
 
@@ -189,6 +197,11 @@ def main():
     os.makedirs(bins, exist_ok=True)
     for name in managed:
         os.remove(os.path.join(bins, name))
+    vins = os.path.join(arguments.out, "vin")
+    os.makedirs(vins, exist_ok=True)
+    for name in os.listdir(vins):
+        if MANAGED_VIN.fullmatch(name):
+            os.remove(os.path.join(vins, name))
     with open(arguments.archive, "rb") as handle:
         archive = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
         entries = find_entries(archive)
@@ -215,6 +228,9 @@ def main():
             index += 1
             with open(os.path.join(bins, "%d.bin" % index), "wb") as blob:
                 blob.write(result["code"])
+            if result["vin"]:
+                with open(os.path.join(vins, "%d.vin" % index), "w", newline="\n") as table:
+                    table.write(result["vin"])
             rows.append(
                 {
                     "idx": index,

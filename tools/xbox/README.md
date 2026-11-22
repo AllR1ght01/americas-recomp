@@ -24,6 +24,11 @@ Experimental tooling for running Xbox Series shader code through the shader reco
    --out <dir>` writes `<dir>/bins/<idx>.bin` and `<dir>/manifest.csv`, with no table of contents and no decoder.
 3. `driver.exe <code.bin> <wave 32|64> <out.spv> [user_data_dwords]` recompiles one compute shader with stubbed
    bindings (user-data pointer pairs backed by fake buffer-descriptor memory).
+   For `vs`, argument 7 is an optional vertex input table (`<idx>.vin`, written by `carve_shaders.py`, lines
+   `vin <first vgpr> <vgpr count> <input register>`): the VGPRs the runtime-built fetch subroutine fills. With it the
+   shader's opening `s_swappc_b64` is replaced by host vertex attribute reads (see "Vertex fetch subroutine" in
+   `docs/xbox/XBOX_SHADERS.md`). The embedded-fetch analyzer is pointed at s96, outside the 16 user words, because Xbox
+   shaders load no attribute tables themselves.
 4. `run_batch.py` runs the driver over a directory of blobs and validates with `spirv-val`.
 5. `stages.exe <code.bin>` times decode / CFG build / structurize separately (for the slow ray-tracing shaders).
 6. `exec.exe <scenario.txt>` is the execution harness: it recompiles a compute shader against REAL Vulkan device memory, dispatches it on the

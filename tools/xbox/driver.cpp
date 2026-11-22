@@ -120,6 +120,22 @@ int main(int argc, char** argv) {
         request.context.pixel = px;
     } else if (stage == "vs" || stage == "ms" || stage == "gs") {
         ShaderVertexStageInfo vx{};
+        if (stage == "vs" && argc > 7 && std::string(argv[7]) != "-") {
+            std::ifstream vf(argv[7]);
+            if (!vf) { std::printf("THROW cannot open vertex input table %s\n", argv[7]); return 1; }
+            std::string kind;
+            while (vf >> kind) {
+                if (kind != "vin") { std::string rest; std::getline(vf, rest); continue; }
+                std::int32_t vgpr, count, attr; vf >> vgpr >> count >> attr;
+                if (vx.resourcesNum >= ShaderVertexStageInfo::MaxResources) { std::printf("THROW too many vertex inputs\n"); return 1; }
+                vx.resourcesDst[vx.resourcesNum++] = {vgpr, count, attr, 0u};
+            }
+            if (vx.resourcesNum != 0) {
+                vx.fetchEmbedded = true;
+                vx.fetchAttribReg = 96u;
+                vx.fetchBufferReg = 96u;
+            }
+        }
         request.context.vertex = vx;
     }
     if (stage != "cs") request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};  // default: fp32 denorm flush, fp16/64 preserve, DX10 clamp

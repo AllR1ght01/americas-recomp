@@ -185,7 +185,7 @@ The stored BVH format is described in [BVH_CONTAINER.md](BVH_CONTAINER.md).
 | Vertex | 92 / 114 | 92 / 114 |
 | Mesh | 559 / 640 | 559 / 640 |
 
-All still `spirv-val` only; nothing executed. Details of each change are in the README. Descriptor chains are the main remaining recompiler-side group (about 82 compute): the descriptor index is a value loaded from a buffer at run time and used as a waterfall key, so there is no static table to build; each shape differs. The vertex `s_swappc`/`s_setpc` cases and the mesh null-pointer cases depend on the real vertex fetch shader / user-data layout and are not recompiler problems.
+All still `spirv-val` only; nothing executed. Details of each change are in the README. Descriptor chains are the main remaining recompiler-side group (about 82 compute): the descriptor index is a value loaded from a buffer at run time and used as a waterfall key, so there is no static table to build; each shape differs. The vertex `s_swappc`/`s_setpc` cases and the mesh null-pointer cases depend on the real vertex fetch shader / user-data layout and are not recompiler problems. (Later fixed for most vertex shaders, see "Vertex fetch subroutine" below.)
 
 ## Compile time: structurizer
 
@@ -350,6 +350,45 @@ The harness passed 16 user words and `bindings.py` tracked only s0-s15, so every
 - Result: mesh 8,035 -> 8,904 of 9,282. 969 shaders went from THROW to VALID; 100 went from VALID to THROW (runtime-indexed descriptor
   table, see the README); 0 of the 350 remaining THROWs pass under fake-memory variants 0, 2 or 3.
 - Canary: three `ms-hiuser` shaders; with the old 16-word driver all three fail and the suite exits 1.
+
+## Vertex fetch subroutine (fifth harness gap)
+Every Xbox vertex shader that reads vertex inputs calls a fetch subroutine that is not in the shader blob. The runtime builds it from
+the input layout and passes its address in user data. 630 of the 2,236 carved VS open with `s_swappc_b64 s[4:5], s[4:5]`. That is
+the same shape as a PS5 external fetch call. The 158 merged VS do the same call after their wave setup, through s[12:13]. The 1,448
+VS without inputs make no call. 1,371 of those were already valid. The recompiler already models an external fetch call: if the
+vertex context lists the VGPRs the subroutine fills (`resourcesDst`, `fetchEmbedded`), the call becomes host vertex attribute reads.
+The AGC driver's static-ABI path gets the same list from the shader's input semantics. The harness passed an empty vertex context,
+and two recompiler rules rejected the Xbox call shape:
+- **Input table.** The FSSM header of a VS has a 5-byte-entry table at 0x138 (`fssm_header.vertex_inputs`): input register, read mask,
+  first VGPR, highest component read. On all 2,236 VS it lists exactly the ISG1 inputs with a non-zero read mask, in order. The first
+  VGPRs are 4, 8, 12 ... for the 630 and 9, 13 ... for the merged ones. In the 630, every VGPR above v3 that the code reads before
+  writing it lies in the table. An approximate decoder confirms this for 626; it cannot settle the other 4. `carve_shaders.py` (and
+  `extract_full.py`, not run here) writes the table as `vin/<idx>.vin`. `driver.cpp` takes it as the `vs` input layout (argv[7]), and
+  `run_full.py` passes `vin_full/<idx>.vin` when it exists. Host input locations are table positions, as in the AGC path. The buffer
+  formats are pipeline state and are not modelled: `spirv-val` only, nothing executed.
+- **Target written after the call** (`isFetchCall`, GraphBuilder.cpp). PS5 shaders were checked for writes to the target pair across
+  the whole program; PS4 shaders only before the call. The Xbox body reloads s4-s7 right after the call, so the target counted as
+  computed (407 shaders, "computed/data-dependent s_swappc_b64 call target"). Now only writes before the call count, for every
+  guest. A later write cannot change the address the call already read.
+- **Link written after the call** (`analyzeSwappcCalls`, `requireReturnAddressesStayInCalls`). Any later touch of a fetch call's link
+  pair threw ("escapes the constant-offset call/return model"). Now the link is tracked by the same dataflow as other call links (as
+  for PS4): reading the return address after the subroutine returns still throws, overwriting it does not. One shader (113) really
+  reads it (`s_or_b64 s[2:3], s[2:3], s[4:5]` while s[4:5] still holds the return address). It stays a failure until the Xbox fetch
+  ABI is known (the subroutine may leave a value there). Unit tests: `core/libs/tests/ScalarSwappc.cpp`.
+
+Result (Mac build, own VS runner equal to `run_full.py` graphics, 120 s): VS 1,371 -> 2,000 valid of 2,236 (626 of the 862 upstream
+failures, plus 3 carved VS that are not in results.json), 0 valid shaders lost. Still failing: 30 descriptor chains, 5 buffer
+slots that the bindings fill with an image T#, 5 timeouts, 113, and the 195 merged VS (158 with inputs, 37 without).
+
+**Merged VS (195): ES halves of the legacy GS pipelines.** All 195 have the same shape. They take the wave mask from s3 like a merged
+program. The 158 with inputs then call the fetch subroutine through s[12:13], after `s_and_b32 s13, s13, 0xff` (the same user word
+carries other data above bit 7). They write their outputs to LDS (`ds_write*`, no `exp`), run `s_barrier`, and end with one
+`s_setpc_b64` to a copy of s[6:7]: a jump into a second program whose address the runtime supplies. The corpus has 195 GS shaders,
+compiled as merged ES-GS programs that read the ESGS data from LDS, so these are most likely their ES halves (the pairing is not
+established). An experiment that allowed the masked high word and an `s_inst_prefetch` before the call only moved the 158 from the
+call error to the tail jump. It was not kept. Translating them needs an ES-half model: the LDS writes become the stage's outputs in
+the GS input layout, and the jump ends the stage. Both halves must agree on the ESGS layout, so this is a pipeline-level change,
+not a per-shader fix.
 
 ## Corpus run time
 A cold mesh run (9,282 shaders, 14 workers) takes about 10 minutes and is bound by total CPU time, not by scheduling: about 8,200

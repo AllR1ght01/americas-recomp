@@ -9,7 +9,7 @@ recorded in run_full_costs.json, so long compiles overlap with the short ones.
 
 Same drivers and defaults as run_corpus_bind.py (compute, driver_heap.exe, fake-memory variants default/0/2/3 until one validates) and
 run_graphics_final.py (PS/VS/MS, driver_gfx2.exe (XBOX_DRIVER_GFX overrides), PS both strict and with XBOX_ALLOW_UNMEASURED_F16_INTERP, barycentric extension
-retry). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
+retry; a VS with vin_full/<idx>.vin gets its fetch-subroutine VGPR layout, see carve_shaders.py). Shaders listed in the --skip files (earlier results, by idx) are not run again. Results are written every 500 shaders, so a
 killed run can be resumed by passing its own output as --skip. Stage '?' in the manifest is mesh (type 6/7), GS has no driver mode and
 is recorded as SKIP."""
 import subprocess, csv, sys, collections, concurrent.futures as cf, json, os, time
@@ -80,6 +80,8 @@ def graphics(idx, st, relaxed):
         if bary:
             e["XBOX_FRAGMENT_BARY"] = "1"
         cmd = [DRIVER_GFX, M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
+        if st == "vs" and os.path.exists(M + f"vin_full/{idx}.vin"):
+            cmd.append(M + f"vin_full/{idx}.vin")
         if st == "ps":
             n, mask = attrs(idx)
             cmd += ["2", str(n), "%x" % mask]
@@ -131,6 +133,8 @@ def cache_key(r, relaxed):
         h.update(part.encode() + b"\0")
     h.update(open(M + f"bins_full/{idx}.bin", "rb").read())
     h.update(b"\0" + open(BINDS + f"{idx}.bind", "rb").read())
+    if os.path.exists(M + f"vin_full/{idx}.vin"):
+        h.update(b"\0vin\0" + open(M + f"vin_full/{idx}.vin", "rb").read())
     return h.hexdigest()
 
 
