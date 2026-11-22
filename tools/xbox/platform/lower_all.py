@@ -1,6 +1,6 @@
 """Lower, pin the wave size and assemble every shader_NN.ll of a directory; report which ones validate.
 usage: python -I lower_all.py <dir with shader_NN.ll> <out_dir> [wave=64] [dxasm=dxasm.exe]
-For each shader writes <out>/sNN.ll (lowered), <out>/wNN.ll (SM 6.6 + wave size) and <out>/repl_NN.dxil (signed; the file bvh_test's BVH_REPLACE_DIR reads).
+For each shader writes <out>/sNN.ll (lowered), <out>/wNN.ll (SM 6.6; the wave size is pinned only when wave operations are used) and <out>/repl_NN.dxil (signed; the file bvh_test's BVH_REPLACE_DIR reads).
 A validator complaint "Flags must match usage" (declared=X, actual=Y) is repaired by rewriting the declared shader-flags word and retrying."""
 import glob, os, re, subprocess, sys
 
@@ -19,7 +19,8 @@ for f in sorted(glob.glob(os.path.join(src, "shader_*.ll"))):
         continue
     lowered = open(s_ll, encoding="utf-8").read()
     if "@dx.op.wave" in lowered or "@dx.op.createHandleFromHeap" in lowered:
-        r = subprocess.run([sys.executable, "-I", os.path.join(here, "dxil_sm66_wave.py"), s_ll, w_ll, wave], capture_output=True, text=True)
+        pin = wave if "@dx.op.wave" in lowered else "0"
+        r = subprocess.run([sys.executable, "-I", os.path.join(here, "dxil_sm66_wave.py"), s_ll, w_ll, pin], capture_output=True, text=True)
         if r.returncode:
             res[n] = "sm66 rewrite failed: " + (r.stderr.strip().splitlines() or ["?"])[-1]
             continue

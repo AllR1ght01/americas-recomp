@@ -129,6 +129,31 @@ class XboxDxilSm66ResourceTests(unittest.TestCase):
         self.assertNotIn("i32 11, !9999", self.rewrite(self.resources(), "0"))
         self.assertIn("i32 11, !9999", self.rewrite(self.resources(), "64"))
 
+    def test_named_handle_is_converted(self):
+        out = self.rewrite(self.resources().replace("%1 = call", "%cb = call"), "0")
+        self.assertNotIn("@dx.op.createHandle(i32 57", out)
+        self.assertIn("%hraw.cb = call %dx.types.Handle @dx.op.createHandleFromBinding(", out)
+        self.assertIn("%cb = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %hraw.cb,", out)
+
+
+class ProxyAddressKernelTests(unittest.TestCase):
+    def test_proxy_kernel_reads_both_bases_from_the_constant_buffer(self):
+        text = (PLATFORM / "proxy_address_kernel.ll").read_text(encoding="utf-8")
+        result, count, left = lower_module.lower(text)
+        self.assertEqual(left, set())
+        self.assertEqual(count, 13)
+        self.assertNotRegex(result, r"i64 (20015998304256|8589930496|8590979072|8590979200)")
+        self.assertIn("@dx.op.cbufferLoadLegacy.i32(i32 59", result)
+        self.assertRegex(result, r"(?m)^!\d+ = !\{null, null, !\d+, null\}$")
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "in.ll", Path(directory) / "out.ll"
+            source.write_text(result, encoding="utf-8")
+            subprocess.run([sys.executable, "-I", str(PLATFORM / "dxil_sm66_wave.py"), str(source), str(target), "0"], check=True, capture_output=True)
+            out = target.read_text(encoding="utf-8")
+        self.assertNotIn("@dx.op.createHandle(i32 57", out)
+        self.assertIn("i8 2 }", out)
+        self.assertNotIn("i32 11, !9999", out)
+
 
 if __name__ == "__main__":
     unittest.main()

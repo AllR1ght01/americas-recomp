@@ -43,10 +43,13 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
 * Lower and sign: `dxc -dumpbin` -> `xbox_dxil_lower.py in.ll out.ll` -> `dxasm in.ll out.dxil` (replaces `@xbox.*` intrinsics; handles min/max f16 and med3 so far;
   it reports the intrinsics it could not replace). `dxil_sm66_wave.py` pins the wave size when a shader depends on 64 lanes.
 * Try: `bvh_test.exe` with `BVH_REPLACE_DIR=<dir of repl_NN.dxil>` for pipeline creation; `dispatch_test.exe shader.dxil [groups] [seed]` for a dispatch on GPU and WARP.
-* `lower_all.py <dir> <out>` runs the whole chain on a directory of disassembled shaders (22 of the 53 builder shaders pass). `oplower_check.py`, `wavelower_check.py` and `typedload_check.py` check lowered operations against software models.
+* `lower_all.py <dir> <out>` runs the whole chain on a directory of disassembled shaders (all 53 builder shaders assemble; the wave size is pinned only where wave operations are used). `oplower_check.py`, `wavelower_check.py` and `typedload_check.py` check lowered operations against software models.
 * `dxasm --hash-only in.ll out.dxil` assembles without validating and writes only the container hash (`dxil_hash.h`), so a partly lowered shader that still calls `@xbox.*` intrinsics can be given to a PC driver.
 * `XS_TRACE=1` makes every proxy log the first call of each forwarded slot (argument registers, caller): one run shows which Xbox-only slots a program uses.
-* Not done: the 31 shaders using raw 64-bit addresses (design in PLATFORM_SURFACE.md).
+* 64-bit addresses: `xbox_address_table.h` is the device side of the lowering's address table (recorded buffers, reserved heap descriptors, the heap
+  indexing root-signature flag); `xbox_overrides::WrapDevice` installs it. `proxy_address_test.exe [kernel.dxil [groups] [warp]]` checks it:
+  build `proxy_address_kernel.ll` with `xbox_dxil_lower.py`, `dxil_sm66_wave.py ... 0` and `dxasm`, run with `PT_DUMP=<prefix>`, then
+  `address_check.py check <prefix>_gpu_u0.bin <prefix>_gpu_u1.bin <threads>`. Build: `cl /nologo /EHsc /O2 /std:c++17 proxy_address_test.cpp d3d12.lib dxgi.lib`.
 
 No game files are part of this repository: the DLLs, the videos and the decoded frames stay local.
 

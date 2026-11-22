@@ -55,7 +55,7 @@ def conv(m):
             "%s%s = call %%dx.types.Handle @dx.op.annotateHandle(i32 216, %%dx.types.Handle %s, %%dx.types.ResourceProperties %s)") % (ind, raw, lb, ub, space, cls, idx, nu, ind, res, raw, props)
 
 # createHandle(i32 57, i8 class, i32 rangeId, i32 index, i1 nonUniform)  -- class 1 = UAV, 2 = CBV
-t = re.sub(r"^(\s*)(%\d+) = call %dx\.types\.Handle @dx\.op\.createHandle\(i32 57, i8 (\d), i32 (\d+), i32 (\d+), i1 (\w+)\)[^\n]*$", conv, t, flags=re.M)
+t = re.sub(r"^(\s*)(%[\w.]+) = call %dx\.types\.Handle @dx\.op\.createHandle\(i32 57, i8 (\d), i32 (\d+), i32 (\d+), i1 (\w+)\)[^\n]*$", conv, t, flags=re.M)
 # the handle names are %N.raw: numbers must stay consecutive, so make every result named instead of numbered
 t = t.replace("%dx.types.ResBind", "%dx.types.ResBind")
 decl = "%dx.types.ResBind = type { i32, i32, i32, i8 }\n" + ("" if "%dx.types.ResourceProperties = type" in t else "%dx.types.ResourceProperties = type { i32, i32 }\n")
