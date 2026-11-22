@@ -97,11 +97,14 @@ descriptors loaded from computed addresses (35) or Phi chains (44), 18 atomic-im
 
 ## Graphics stages (first sample; wave 32, 30 s limit, binding model, fake buffers zero-backed)
 
-`driver <bin> <wave> <out> <bind> 1 <ps|vs|ms> [inputAddr] [interpolators] [fp16mask]`, runners `run_graphics.py`, `run_mesh.py`.
+`driver <bin> <wave> <out> <bind> 1 <ps|vs|ms> [inputAddr] [interpolators] [fp16mask] [flatmask]`, runners `run_graphics.py`, `run_mesh.py`.
+The masks are hex, one bit per interpolant: `fp16mask` sets FP16_INTERP_MODE (bit 19 of the interpolator setting), `flatmask` sets
+FLAT_SHADE (bit 10).
 **Everything the shader blob does not state is a default** (no register state is parsed; the FSSM header has an attribute table at
 +0x130 that is not decoded). Defaults: float mode 0xc0 (fp32 denorm flush, fp16/64 preserve, DX10 clamp; the shader's own
 `s_setreg` then ORs in its MODE bits), pixel inputs = perspective center only, export target i -> i, mode 4, no blend/merge state;
-interpolant count and FP16 interpolants are derived from the `v_interp*` instructions; mesh = triangle list, 128-thread group,
+interpolant count, FP16 interpolants and flat interpolants (read only with `v_interp_mov_f32` P0, `run_full.py`) are derived from
+the `v_interp*` instructions; mesh = triangle list, 128-thread group,
 42 primitives / 126 vertices per group, ESGS item size 4. Target capabilities include ClipDistance/CullDistance/MeshShadingEXT.
 
 | stage | total | valid (`spirv-val`) | invalid |
@@ -125,11 +128,19 @@ Verified against the code: the section directory at 0x120-0x130 and the pixel in
 component mask, index, slot, flags). The table's entry count equals the number of interpolants the code reads in 719 of 738
 pixel shaders; the code's `v_interp` attribute number is the entry's position, and flag bit 4 marks 16-bit interpolants
 (736/738; bit 3 covers all 738 but also flags some 32-bit ones). Driving the recompiler from the table instead of from the
-instructions gives identical results on all 738 pixel shaders (375 valid either way). So the table adds no new information for
-the interpolants themselves; it confirms the code-derived defaults.
+instructions gives identical results on all 738 pixel shaders (375 valid either way).
+
+Flag bits 0-1 are the interpolation mode: 1 = flat, 2 = interpolated. On all 12,101 carved pixel shaders every entry has exactly
+one of them; the 4,295 interpolants the code reads only with `v_interp_mov_f32` P0 all have bit 0, no bit-0 interpolant is read
+any other way, and the 49,594 read with `v_interp_p1/p2_f32` or the 16-bit interpolation instructions all have bit 1 (10 shaders
+read 12 or 13 interpolants but have no table at 0x138). Until this was decoded the harness passed no FLAT_SHADE bits, so an
+interpolant the game declares flat looked like a smooth one read at vertex 0. That is not host interpolation, so the shader fell
+back to barycentric emulation, which gives every interpolant three locations; shaders with eleven or more interpolants exceeded
+the 32-location limit there and compiled only with `VK_KHR_fragment_shader_barycentric`. `run_full.py` now passes the flat mask,
+taken from the code as for the FP16 mask (the two agree on every interpolant the code reads).
 
 Not decoded: the trailing sections (the directory points past the code), the register-like words at 0xd4/0xf8/0xfc/0x110/0x12c,
-flag values 1/9/10, the vertex/mesh output tables near 0x1d0. Their code-offset-like fields do not land on instruction
+flag value 10 (0x0a, also 16-bit), the vertex/mesh output tables near 0x1d0. Their code-offset-like fields do not land on instruction
 boundaries, so they are not per-instruction annotations. No pipeline state (input enable, export formats, MODE) was found,
 so the defaults above for those remain defaults.
 

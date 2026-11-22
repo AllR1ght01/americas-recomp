@@ -50,14 +50,14 @@
  },
  {
   "kind": "ps-bary",
-  "idx": "16400",
+  "idx": "16500",
   "stage": "PS",
   "relaxed": false,
   "expect": "VALID_BARY_EXT"
  },
  {
   "kind": "ps-bary",
-  "idx": "16330",
+  "idx": "16326",
   "stage": "PS",
   "relaxed": false,
   "expect": "VALID_BARY_EXT"

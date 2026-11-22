@@ -33,6 +33,11 @@ class PixelInputsTest(unittest.TestCase):
 
     def test_no_table(self):
         self.assertEqual(fssm.interpolants(bytes(0x200)), (0, 0))
+        self.assertEqual(fssm.flat_mask(bytes(0x200)), 0)
+
+    def test_flat_mask_takes_flags_0x01_and_0x09_not_0x02_0x1a_0x0a(self):
+        b = blob_with_inputs([(1, 0xF, 0, 1, 0x02), (2, 0x1, 1, 2, 0x01), (3, 0xF, 2, 3, 0x1A), (4, 0x3, 3, 4, 0x09), (5, 0xF, 4, 5, 0x0A)])
+        self.assertEqual(fssm.flat_mask(bytes(b)), 0b01010)
 
     def test_table_stops_at_0x1d0(self):
         b = blob_with_inputs([(k, 0xF, k, k, 0) for k in range(24)])
