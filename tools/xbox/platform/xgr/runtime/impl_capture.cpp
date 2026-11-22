@@ -42,6 +42,12 @@ struct ScreenshotFile {
   uint32_t width;
   uint32_t height;
 };
+struct TakeScreenshotResult {
+  char localId[kLocalIdBytes];
+  uint16_t availableScreenshotFormats;
+};
+static_assert(sizeof(TakeScreenshotResult) == 252, "XAppCaptureTakeScreenshotResult layout");
+
 struct DiagnosticScreenshotResult {
   size_t fileCount;
   ScreenshotFile files[10];
@@ -133,6 +139,13 @@ HRESULT register_silent_event(const void* callback, task::RegistrationToken* tok
   if (!callback || !token) return E_INVALIDARG;
   token->token = g_next_token++;
   return S_OK;
+}
+
+HRESULT XAppCaptureTakeScreenshot_impl(void*, void* requestingUser, TakeScreenshotResult* result) {
+  if (!result) return E_INVALIDARG;
+  std::memset(result, 0, sizeof(*result));
+  if (!requestingUser) return E_INVALIDARG;
+  return capture_refusal();
 }
 
 HRESULT XAppCaptureTakeDiagnosticScreenshot_impl(void*, uint8_t, uint16_t captureFlags, const char* filenamePrefix,
@@ -269,6 +282,7 @@ HRESULT XAppCaptureRegisterMetadataPurged_impl(void*, task::Queue*, void*, const
 uint8_t XAppCaptureUnRegisterMetadataPurged_impl(void*, task::RegistrationToken, uint8_t) { return 1; }
 
 const Override kOverrides[] = {
+    {"XAppCaptureTakeScreenshot", reinterpret_cast<void*>(&XAppCaptureTakeScreenshot_impl)},
     {"XAppCaptureTakeDiagnosticScreenshot", reinterpret_cast<void*>(&XAppCaptureTakeDiagnosticScreenshot_impl)},
     {"XAppCaptureRecordDiagnosticClip", reinterpret_cast<void*>(&XAppCaptureRecordDiagnosticClip_impl)},
     {"XAppCaptureOpenScreenshotStream", reinterpret_cast<void*>(&XAppCaptureOpenScreenshotStream_impl)},

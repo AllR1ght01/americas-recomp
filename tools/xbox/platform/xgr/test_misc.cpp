@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -88,6 +89,8 @@ static const GUID kUser = {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 
 static const GUID kSystem3 = {0x67ce4bfc, 0xb1d1, 0x4ac7, {0xbc, 0x3a, 0xcb, 0x92, 0x19, 0xa9, 0x7a, 0x85}};
 static const GUID kActivation = {0x2e4f76fe, 0x0fc7, 0x461e, {0xab, 0x4d, 0xa4, 0x49, 0x94, 0x34, 0xc3, 0xcf}};
 static const GUID kInvite2 = {0x014d1cc3, 0xbcfe, 0x41ff, {0xb2, 0xf0, 0xe1, 0xef, 0x07, 0x15, 0x58, 0x28}};
+static const GUID kStore = {0x0dd112ac, 0x7c24, 0x448c, {0xb9, 0x2b, 0x39, 0x60, 0xfb, 0x5b, 0xd3, 0x0c}};
+static const GUID kError = {0x8ca467f7, 0x22e8, 0x4096, {0x84, 0x56, 0xbb, 0x8a, 0xa1, 0x3f, 0x79, 0xd8}};
 
 constexpr uint32_t kManual = 0;
 constexpr uint32_t kThreadPool = 1;
@@ -292,19 +295,138 @@ static void CheckGameEvent() {
   user.At<void (*)(void*, void*)>(4, "XUserCloseHandle")(user.self, handle);
 }
 
-static void CheckStillFailing() {
+struct HandleEvent {
+  void* handle;
+  uint32_t type;
+  uint32_t reason;
+};
+struct HandleRecorder {
+  std::mutex lock;
+  std::vector<HandleEvent> events;
+  size_t Count(void* handle, uint32_t type, uint32_t reason) {
+    std::lock_guard<std::mutex> guard(lock);
+    size_t n = 0;
+    for (const HandleEvent& e : events) n += e.handle == handle && e.type == type && e.reason == reason;
+    return n;
+  }
+  size_t Size() {
+    std::lock_guard<std::mutex> guard(lock);
+    return events.size();
+  }
+};
+static void CALLBACK RecordHandle(void* handle, uint32_t type, uint32_t reason, void* context) {
+  auto* recorder = static_cast<HandleRecorder*>(context);
+  std::lock_guard<std::mutex> guard(recorder->lock);
+  recorder->events.push_back({handle, type, reason});
+}
+
+struct ErrorReports {
+  std::mutex lock;
+  std::vector<std::string> messages;
+};
+static bool CALLBACK RecordError(HRESULT, const char* message, void* context) {
+  auto* reports = static_cast<ErrorReports*>(context);
+  std::lock_guard<std::mutex> guard(reports->lock);
+  reports->messages.emplace_back(message ? message : "");
+  return false;
+}
+
+constexpr uint32_t kStoreContextHandle = 9;
+constexpr uint32_t kTaskQueueHandle = 12;
+constexpr uint32_t kUserHandle = 13;
+constexpr uint32_t kCreated = 0;
+constexpr uint32_t kDestroyed = 1;
+
+static void CheckHandleTracking() {
   Api system3 = Get("IXSystemImpl3", kSystem3);
-  Check(system3.At<HRESULT (*)(void*, void*, void*)>(6, "XSystemHandleTrack")(system3.self, nullptr, nullptr) == E_NOTIMPL, "XSystemHandleTrack stays failing");
+  auto track = system3.At<HRESULT (*)(void*, void (CALLBACK*)(void*, uint32_t, uint32_t, void*), void*)>(6, "XSystemHandleTrack");
+  auto valid = system3.At<BOOLEAN (*)(void*, void*)>(7, "XSystemIsHandleValid");
+  auto duplicate = g_tq.api.At<HRESULT (*)(void*, void*, void**)>(15, "XTaskQueueDuplicateHandle");
+  auto processQueue = g_tq.api.At<bool (*)(void*, void**)>(25, "XTaskQueueGetCurrentProcessTaskQueue");
+
+  HandleRecorder recorder;
+  Check(track(system3.self, RecordHandle, &recorder) == S_OK, "XSystemHandleTrack accepts a callback");
   void* q = nullptr;
-  g_tq.Create(kManual, kManual, &q);
-  Check(!system3.At<BOOLEAN (*)(void*, void*)>(7, "XSystemIsHandleValid")(system3.self, q), "XSystemIsHandleValid stays unimplemented (stub answers false)");
+  Check(g_tq.Create(kManual, kManual, &q) == S_OK && recorder.Count(q, kTaskQueueHandle, kCreated) == 1 && valid(system3.self, q),
+        "XTaskQueueCreate reports a created TaskQueue handle and XSystemIsHandleValid accepts it");
+  void* copy = nullptr;
+  Check(duplicate(g_tq.api.self, q, &copy) == S_OK && copy == q && recorder.Count(q, kTaskQueueHandle, kCreated) == 1,
+        "XTaskQueueDuplicateHandle adds a reference without a second Created event");
+  g_tq.Close(copy);
+  Check(valid(system3.self, q) && recorder.Count(q, kTaskQueueHandle, kDestroyed) == 0, "closing one of two references keeps the handle valid");
   g_tq.Close(q);
+  Check(!valid(system3.self, q) && recorder.Count(q, kTaskQueueHandle, kDestroyed) == 1,
+        "closing the last reference reports Destroyed and XSystemIsHandleValid rejects the handle");
+
+  void* process = nullptr;
+  Check(processQueue(g_tq.api.self, &process) && process && valid(system3.self, process), "XTaskQueueGetCurrentProcessTaskQueue hands out a tracked handle");
+  g_tq.Close(process);
+
+  Api user = Get("IXUserImpl", kUser);
+  AsyncBlock add{};
+  user.At<HRESULT (*)(void*, uint32_t, AsyncBlock*)>(7, "XUserAddAsync")(user.self, 1, &add);
+  g_tq.WaitAsync(&add);
+  void* handle = nullptr;
+  user.At<HRESULT (*)(void*, AsyncBlock*, void**)>(8, "XUserAddResult")(user.self, &add, &handle);
+  Check(handle && recorder.Count(handle, kUserHandle, kCreated) == 1 && valid(system3.self, handle), "XUserAddResult reports a created User handle");
+  void* userCopy = nullptr;
+  user.At<HRESULT (*)(void*, void*, void**)>(3, "XUserDuplicateHandle")(user.self, handle, &userCopy);
+  user.At<void (*)(void*, void*)>(4, "XUserCloseHandle")(user.self, userCopy);
+  Check(valid(system3.self, handle) && recorder.Count(handle, kUserHandle, kDestroyed) == 0, "a duplicated User handle stays valid until its last close");
+  user.At<void (*)(void*, void*)>(4, "XUserCloseHandle")(user.self, handle);
+  Check(!valid(system3.self, handle) && recorder.Count(handle, kUserHandle, kDestroyed) == 1, "closing the last User handle reports Destroyed");
+
+  Api store = Get("IXStoreImpl", kStore);
+  void* context = nullptr;
+  store.At<HRESULT (*)(void*, void*, void**)>(3, "XStoreCreateContext")(store.self, nullptr, &context);
+  Check(context && recorder.Count(context, kStoreContextHandle, kCreated) == 1 && valid(system3.self, context),
+        "XStoreCreateContext reports a created StoreContext handle");
+  store.At<void (*)(void*, void*)>(4, "XStoreCloseContextHandle")(store.self, context);
+  Check(!valid(system3.self, context) && recorder.Count(context, kStoreContextHandle, kDestroyed) == 1,
+        "XStoreCloseContextHandle reports the StoreContext handle destroyed");
+
+  Check(!valid(system3.self, nullptr), "XSystemIsHandleValid rejects a null handle");
+  int notAHandle = 0;
+  Check(!valid(system3.self, &notAHandle), "XSystemIsHandleValid rejects a pointer the runtime never handed out");
+
+  Check(track(system3.self, nullptr, nullptr) == S_OK, "XSystemHandleTrack with a null callback turns the callback off");
+  size_t before = recorder.Size();
+  void* untracked = nullptr;
+  g_tq.Create(kManual, kManual, &untracked);
+  Check(valid(system3.self, untracked), "handles stay tracked for XSystemIsHandleValid with the callback off");
+  g_tq.Close(untracked);
+  Check(recorder.Size() == before, "no callback runs after tracking is turned off");
+
+  Api error = Get("IXErrorImpl", kError);
+  auto setCallback = error.At<void (*)(void*, bool (CALLBACK*)(HRESULT, const char*, void*), void*)>(4, "XErrorSetCallback");
+  ErrorReports reports;
+  setCallback(error.self, RecordError, &reports);
+  void* leaked = nullptr;
+  g_tq.Create(kManual, kManual, &leaked);
+  auto uninitialize = reinterpret_cast<void (*)()>(GetProcAddress(GetModuleHandleA("xgameruntime.dll"), "UninitializeApiImpl"));
+  uninitialize();
+  bool reported = false;
+  {
+    std::lock_guard<std::mutex> guard(reports.lock);
+    for (const std::string& m : reports.messages) reported = reported || m.find("TaskQueue handle") != std::string::npos;
+  }
+  Check(reported, "UninitializeApiImpl reports a handle that was never closed through XErrorReport");
+  setCallback(error.self, nullptr, nullptr);
+  g_tq.Close(leaked);
+}
+
+static void CheckPendingInvites() {
+  const HRESULT kNotFound = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
   Api activation = Get("IXGameActivationImpl", kActivation);
-  Check(activation.At<HRESULT (*)(void*, const char*)>(5, "XGameActivationAcceptPendingInvite")(activation.self, "ms-xbl-0://invite") == E_NOTIMPL,
-        "XGameActivationAcceptPendingInvite stays failing");
+  auto acceptActivation = activation.At<HRESULT (*)(void*, const char*)>(5, "XGameActivationAcceptPendingInvite");
+  Check(acceptActivation(activation.self, "ms-xbl-0://invite") == kNotFound,
+        "XGameActivationAcceptPendingInvite reports no such pending invite (none is ever delivered offline)");
+  Check(acceptActivation(activation.self, nullptr) == E_INVALIDARG && acceptActivation(activation.self, "") == E_INVALIDARG,
+        "XGameActivationAcceptPendingInvite rejects a null or empty invite URI");
   Api invite = Get("IXGameInviteImpl2", kInvite2);
-  Check(invite.At<HRESULT (*)(void*, const char*)>(7, "XGameInviteAcceptPendingInvite")(invite.self, "ms-xbl-0://invite") == E_NOTIMPL,
-        "XGameInviteAcceptPendingInvite stays failing");
+  auto acceptInvite = invite.At<HRESULT (*)(void*, const char*)>(7, "XGameInviteAcceptPendingInvite");
+  Check(acceptInvite(invite.self, "ms-xbl-0://invite") == kNotFound, "XGameInviteAcceptPendingInvite reports no such pending invite");
+  Check(acceptInvite(invite.self, nullptr) == E_INVALIDARG, "XGameInviteAcceptPendingInvite rejects a null invite URI");
 }
 
 int main() {
@@ -324,7 +446,8 @@ int main() {
   CheckComposite();
   CheckThreadPool();
   CheckGameEvent();
-  CheckStillFailing();
+  CheckHandleTracking();
+  CheckPendingInvites();
   std::printf("%s: %d failure(s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures);
   return g_failures ? 1 : 0;
 }

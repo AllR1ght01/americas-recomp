@@ -21,6 +21,8 @@ struct WriteStats { uint64_t interval, budget, elapsed, bytesWritten; };
 
 const GUID kPackage4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
 const GUID kAsync = {0x073b7dcb, 0x1fcf, 0x4030, {0x94, 0xbe, 0xe3, 0xc9, 0xeb, 0x62, 0x34, 0x28}};
+const GUID kPersistentLocalStorage3 = {0x41a4e10c, 0x5a7e, 0x41d9, {0x8c, 0x37, 0x37, 0xbd, 0xe6, 0x2a, 0x07, 0xd6}};
+constexpr int kMountForPackageSlot = 8;
 
 enum PackageSlot {
   GetCurrentProcessPackageIdentifier = 3, IsPackagedProcess, CreateInstallationMonitor, CloseInstallationMonitorHandle,
@@ -447,6 +449,70 @@ void phase_config() {
         "XPackageInstallChunksAsync: bad selector fails the call");
 }
 
+typedef HRESULT (*MountForPackageFn)(void*, const char*, void**);
+MountForPackageFn mount_for_package(Runtime& r, void** self) {
+  auto query = reinterpret_cast<QueryFn>(reinterpret_cast<void*>(GetProcAddress(r.module, "QueryApiImpl")));
+  *self = nullptr;
+  if (!query || query(kPersistentLocalStorage3, kPersistentLocalStorage3, self) || !*self) return nullptr;
+  return reinterpret_cast<MountForPackageFn>((*static_cast<void***>(*self))[kMountForPackageSlot]);
+}
+
+void phase_uninstall_and_pls() {
+  const char* P = "uninstall-and-pls";
+  clear_package_env();
+  wchar_t temp[MAX_PATH] = {};
+  GetTempPathW(MAX_PATH, temp);
+  std::wstring pls = std::wstring(temp) + L"xgr_test_pls_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+  set_env(L"XGR_PLS_DIR", pls.c_str());
+  set_env(L"XGR_PLS_SIZE_MB", L"16");
+  Runtime r;
+  if (!r.load()) { check(false, P, "load runtime"); return; }
+
+  Selector tag{}; tag.type = 1; tag.text = "BigMaps";
+  check(r.pkg<HRESULT>(UninstallChunks, "XGR.LocalPackage", 1u, &tag) == S_OK, P, "XPackageUninstallChunks(own, tag) succeeds and removes nothing");
+  uint32_t avail = 9;
+  check(r.pkg<HRESULT>(FindChunkAvailability, "XGR.LocalPackage", 1u, &tag, &avail) == S_OK && avail == 0, P,
+        "chunks stay Ready after XPackageUninstallChunks (every chunk is needed by the one installed package)");
+  Selector chunk{}; chunk.type = 2; chunk.chunkId = 1000;
+  check(r.pkg<HRESULT>(UninstallChunks, "XGR.LocalPackage", 1u, &chunk) == E_INVALIDARG, P,
+        "XPackageUninstallChunks rejects a selector with only a chunk id (documented)");
+  check(r.pkg<HRESULT>(UninstallChunks, "XGR.LocalPackage", 0u, static_cast<Selector*>(nullptr)) == E_INVALIDARG, P,
+        "XPackageUninstallChunks rejects an empty selector list");
+  Selector nullTag{}; nullTag.type = 1; nullTag.text = nullptr;
+  check(r.pkg<HRESULT>(UninstallChunks, "XGR.LocalPackage", 1u, &nullTag) == E_INVALIDARG, P, "XPackageUninstallChunks rejects a tag selector without a tag");
+  check(r.pkg<HRESULT>(UninstallChunks, "SomeDlc", 1u, &tag) == kNoPackageIdentifier, P, "XPackageUninstallChunks(DLC not present)");
+  check(r.pkg<HRESULT>(UninstallChunks, static_cast<const char*>(nullptr), 1u, &tag) == E_INVALIDARG, P, "XPackageUninstallChunks(null)");
+
+  void* storage = nullptr;
+  MountForPackageFn mountFor = mount_for_package(r, &storage);
+  check(mountFor != nullptr, P, "IXPersistentLocalStorageImpl3 is available");
+  if (mountFor) {
+    void* mount = nullptr;
+    check(mountFor(storage, "XGR.LocalPackage", &mount) == S_OK && mount, P, "XPersistentLocalStorageMountForPackage(own)");
+    check(mount && mount_path(r, mount, P) == to_utf8(pls), P, "the mount is the title's persistent local storage directory");
+    r.pkg<void>(CloseMountHandle, mount);
+    size_t size = 0;
+    check(r.pkg<HRESULT>(GetMountPathSize, mount, &size) == E_INVALIDARG, P, "XPackageCloseMountHandle releases the storage mount");
+    mount = reinterpret_cast<void*>(1);
+    check(mountFor(storage, "OtherTitle", &mount) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && !mount, P,
+          "XPersistentLocalStorageMountForPackage(another title): no such storage");
+    check(mountFor(storage, nullptr, &mount) == E_INVALIDARG && mountFor(storage, "XGR.LocalPackage", nullptr) == E_INVALIDARG, P,
+          "XPersistentLocalStorageMountForPackage rejects null arguments");
+  }
+  check(r.unload(), P, "runtime unloaded");
+
+  set_env(L"XGR_PLS_SIZE_MB", nullptr);
+  Runtime none;
+  if (!none.load()) { check(false, P, "load runtime"); return; }
+  mountFor = mount_for_package(none, &storage);
+  void* mount = nullptr;
+  check(mountFor && mountFor(storage, "XGR.LocalPackage", &mount) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && !mount, P,
+        "a title that declares no persistent local storage has none to mount");
+  check(none.unload(), P, "runtime unloaded");
+  set_env(L"XGR_PLS_DIR", nullptr);
+  RemoveDirectoryW(pls.c_str());
+}
+
 void cleanup() {
   check(remove_own_config(), "cleanup", "test MicrosoftGame.config removed");
 }
@@ -465,6 +531,7 @@ int main() {
   phase_environment();
   phase_bogus_language();
   if (!remove_own_config()) check(false, "setup", "remove config between phases");
+  phase_uninstall_and_pls();
   phase_config();
   cleanup();
   std::printf("%s: %d failure(s)\n", g_failures ? "FAILED" : "OK", g_failures);

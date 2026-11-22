@@ -11,6 +11,7 @@
 
 #include "xgr_internal.h"
 #include "xtask.h"
+#include "handles.h"
 
 namespace gtx::xgr::package {
 const std::string& current_package_identifier();
@@ -182,15 +183,22 @@ HRESULT array_result(task::AsyncBlock* async, const void* identity, uint32_t cou
 HRESULT XStoreCreateContext_impl(void*, void*, Context** handle) {
   if (!handle) return E_INVALIDARG;
   auto* context = new Context();
-  std::lock_guard<std::mutex> lock(g_lock);
-  g_contexts.insert(context);
+  {
+    std::lock_guard<std::mutex> lock(g_lock);
+    g_contexts.insert(context);
+  }
+  handles::opened(context, handles::Type::StoreContext);
   *handle = context;
   return S_OK;
 }
 
 void XStoreCloseContextHandle_impl(void*, Context* handle) {
-  std::lock_guard<std::mutex> lock(g_lock);
-  if (g_contexts.erase(handle)) delete handle;
+  {
+    std::lock_guard<std::mutex> lock(g_lock);
+    if (!g_contexts.erase(handle)) return;
+  }
+  handles::closed(handle);
+  delete handle;
 }
 
 HRESULT XStoreQueryAssociatedProductsAsync_impl(void*, Context* context, uint32_t, uint32_t, task::AsyncBlock* async) {
@@ -251,9 +259,21 @@ void XStoreCloseProductsQueryHandle_impl(void*, void*) {}
 
 License* new_license() {
   auto* license = new License();
-  std::lock_guard<std::mutex> lock(g_lock);
-  g_licenses.insert(license);
+  {
+    std::lock_guard<std::mutex> lock(g_lock);
+    g_licenses.insert(license);
+  }
+  handles::opened(license, handles::Type::StoreLicense);
   return license;
+}
+
+void close_license(License* license) {
+  {
+    std::lock_guard<std::mutex> lock(g_lock);
+    if (!g_licenses.erase(license)) return;
+  }
+  handles::closed(license);
+  delete license;
 }
 
 HRESULT XStoreAcquireLicenseForPackageAsync_impl(void*, Context* context, const char* packageIdentifier, task::AsyncBlock* async) {
@@ -262,10 +282,7 @@ HRESULT XStoreAcquireLicenseForPackageAsync_impl(void*, Context* context, const 
   if (!is_title_package(packageIdentifier)) return begin(async, identity, "XStoreAcquireLicenseForPackageAsync", kContentNotOwned);
   License* license = new_license();
   HRESULT hr = begin(async, identity, "XStoreAcquireLicenseForPackageAsync", S_OK, &license, sizeof(license));
-  if (FAILED(hr)) {
-    std::lock_guard<std::mutex> lock(g_lock);
-    if (g_licenses.erase(license)) delete license;
-  }
+  if (FAILED(hr)) close_license(license);
   return hr;
 }
 HRESULT XStoreAcquireLicenseForPackageResult_impl(void*, task::AsyncBlock* async, void** license) {
@@ -282,10 +299,7 @@ HRESULT XStoreAcquireLicenseForDurablesResult_impl(void*, task::AsyncBlock* asyn
 
 uint8_t XStoreIsLicenseValid_impl(void*, const License* license) { return live_license(license) ? 1 : 0; }
 
-void XStoreCloseLicenseHandle_impl(void*, License* license) {
-  std::lock_guard<std::mutex> lock(g_lock);
-  if (g_licenses.erase(license)) delete license;
-}
+void XStoreCloseLicenseHandle_impl(void*, License* license) { close_license(license); }
 
 HRESULT begin_can_acquire(task::AsyncBlock* async, const void* identity, const char* name, bool ownProduct) {
   if (!ownProduct) return begin(async, identity, name, kNetworkError);

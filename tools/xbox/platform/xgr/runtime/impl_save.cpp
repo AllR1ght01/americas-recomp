@@ -17,6 +17,7 @@
 
 #include "xgr_internal.h"
 #include "xtask.h"
+#include "handles.h"
 
 namespace gtx::xgr::user { uint64_t id_of(void* handle); }
 
@@ -458,10 +459,24 @@ struct UpdateObject {
 std::mutex g_handlesLock;
 std::unordered_map<const void*, std::pair<Kind, std::shared_ptr<void>>> g_handles;
 
+handles::Type handle_type(Kind kind) {
+  switch (kind) {
+    case Kind::Provider:
+      return handles::Type::GameSaveProvider;
+    case Kind::Container:
+      return handles::Type::GameSaveContainer;
+    default:
+      return handles::Type::GameSaveUpdate;
+  }
+}
+
 template <class T> void* publish(Kind kind, std::shared_ptr<T> object) {
   void* key = object.get();
-  std::lock_guard<std::mutex> guard(g_handlesLock);
-  g_handles[key] = {kind, std::move(object)};
+  {
+    std::lock_guard<std::mutex> guard(g_handlesLock);
+    g_handles[key] = {kind, std::move(object)};
+  }
+  handles::opened(key, handle_type(kind));
   return key;
 }
 
@@ -482,6 +497,7 @@ void retire(Kind kind, const void* handle) {
     object = std::move(it->second.second);
     g_handles.erase(it);
   }
+  handles::closed(handle);
 }
 
 HRESULT commit_update(Store& s, const std::string& name, const std::string& displayName, const BlobOps& ops, uint64_t bytes) {

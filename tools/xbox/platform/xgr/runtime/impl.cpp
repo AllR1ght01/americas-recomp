@@ -25,6 +25,9 @@ namespace gtx::xgr::accessibility { const Override* overrides(size_t* count); }
 namespace gtx::xgr::capture { const Override* overrides(size_t* count); }
 namespace gtx::xgr::misc { const Override* overrides(size_t* count); }
 namespace gtx::xgr::store { const Override* overrides(size_t* count); }
+namespace gtx::xgr::launch { const Override* overrides(size_t* count); }
+namespace gtx::xgr::ui { const Override* overrides(size_t* count); }
+namespace gtx::xgr::handles { const Override* overrides(size_t* count); }
 
 #include <iterator>
 #include <vector>
@@ -166,6 +169,12 @@ const Override* overrides(size_t* count) {
     v.insert(v.end(), mi, mi + n);
     const Override* so = store::overrides(&n);
     v.insert(v.end(), so, so + n);
+    const Override* la = launch::overrides(&n);
+    v.insert(v.end(), la, la + n);
+    const Override* gu = ui::overrides(&n);
+    v.insert(v.end(), gu, gu + n);
+    const Override* ha = handles::overrides(&n);
+    v.insert(v.end(), ha, ha + n);
     return v;
   }();
   *count = all.size();

@@ -182,7 +182,11 @@ static void CheckDiagnostics() {
 static void CheckScreenshots() {
   auto take = g_capture.At<TakeScreenshotFn>(5, "XAppCaptureTakeScreenshot");
   unsigned char result[252] = {};
-  Check(take(g_capture.self, g_local_user, result) == E_NOTIMPL, "XAppCaptureTakeScreenshot stays on the logging stub (keeps the XAppCapture feature unavailable)");
+  std::memset(result, 0xcc, sizeof(result));
+  Check(take(g_capture.self, g_local_user, result) == kDisabledByCaptureSetting && AllZero(result, sizeof(result)),
+        "XAppCaptureTakeScreenshot takes nothing and reports game captures disabled, result cleared");
+  Check(take(g_capture.self, nullptr, result) == E_INVALIDARG, "XAppCaptureTakeScreenshot rejects a null user");
+  Check(take(g_capture.self, g_local_user, nullptr) == E_INVALIDARG, "XAppCaptureTakeScreenshot rejects a null result");
 
   auto open = g_capture.At<OpenScreenshotStreamFn>(6, "XAppCaptureOpenScreenshotStream");
   void* handle = reinterpret_cast<void*>(1);
@@ -275,7 +279,9 @@ static void CheckRecordToggle() {
   Check(GetStatus(g_local_user, &status) == S_OK && status.isBlockedForApp && !status.canStartBroadcast, "XAppCaptureDisableRecord is remembered: broadcast status shows it blocked for the app");
   DiagnosticScreenshotResult shot;
   char id[64];
-  Check(TakeDiagnostic(1, nullptr, &shot) == kBlockedByTitle && StartUserRecord(g_local_user, sizeof(id), id) == kBlockedByTitle,
+  unsigned char screenshot[252];
+  Check(TakeDiagnostic(1, nullptr, &shot) == kBlockedByTitle && StartUserRecord(g_local_user, sizeof(id), id) == kBlockedByTitle &&
+            g_capture.At<TakeScreenshotFn>(5, "XAppCaptureTakeScreenshot")(g_capture.self, g_local_user, screenshot) == kBlockedByTitle,
         "with recording disabled by the title, captures report GameDVR blocked by title");
   Check(enable(g_capture.self) == S_OK, "XAppCaptureEnableRecord returns S_OK");
   Check(GetStatus(g_local_user, &status) == S_OK && !status.isBlockedForApp && TakeDiagnostic(1, nullptr, &shot) == kDisabledByCaptureSetting,
@@ -362,7 +368,7 @@ static void CheckMetadata() {
 static void CheckFeature() {
   Api feature = Get(kFeature);
   Check(!feature.At<BOOLEAN (*)(void*, uint32_t)>(3, "XGameRuntimeIsFeatureAvailable")(feature.self, 1),
-        "XGameRuntimeIsFeatureAvailable still reports XAppCapture unavailable");
+        "XGameRuntimeIsFeatureAvailable reports XAppCapture unavailable (no capture service)");
 }
 
 int main() {
