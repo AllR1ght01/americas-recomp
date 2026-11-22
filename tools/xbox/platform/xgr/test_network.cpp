@@ -132,7 +132,7 @@ static void CheckPortChanged() {
   HRESULT hr2 = reg(g_net.self, nullptr, g_port_event, reinterpret_cast<void*>(&PortChanged), &second);
   WaitForSingleObject(g_port_event, 5000);
   Check(hr2 == S_OK && second.value && second.value != token.value, "XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged hands out distinct tokens");
-  Check(unreg(g_net.self, token, TRUE) == 1 && unreg(g_net.self, second, FALSE) == 1, "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged returns true");
+  Check(unreg(g_net.self, token, TRUE) == 1 && unreg(g_net.self, second, TRUE) == 1, "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged returns true");
   Check(unreg(g_net.self, token, FALSE) == 1, "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged returns true for a removed token");
   Token unused{};
   Check(reg(g_net.self, nullptr, nullptr, nullptr, &unused) == E_INVALIDARG, "XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged rejects a null callback");
