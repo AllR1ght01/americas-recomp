@@ -198,17 +198,18 @@ def main():
             "%s already holds %d carved blobs; pass --force to replace them"
             % (bins, len(managed))
         )
-    os.makedirs(bins, exist_ok=True)
-    for name in managed:
-        os.remove(os.path.join(bins, name))
-    vins = os.path.join(arguments.out, "vin")
-    os.makedirs(vins, exist_ok=True)
-    for name in os.listdir(vins):
-        if MANAGED_VIN.fullmatch(name):
-            os.remove(os.path.join(vins, name))
-    with open(arguments.archive, "rb") as handle:
-        archive = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+    with open(arguments.archive, "rb") as handle, mmap.mmap(
+        handle.fileno(), 0, access=mmap.ACCESS_READ
+    ) as archive:
         entries = find_entries(archive)
+        os.makedirs(bins, exist_ok=True)
+        for name in managed:
+            os.remove(os.path.join(bins, name))
+        vins = os.path.join(arguments.out, "vin")
+        os.makedirs(vins, exist_ok=True)
+        for name in os.listdir(vins):
+            if MANAGED_VIN.fullmatch(name):
+                os.remove(os.path.join(vins, name))
         print("names found:", len(entries), flush=True)
         rows = []
         errors = collections.Counter()
@@ -246,7 +247,6 @@ def main():
                     "error": "",
                 }
             )
-        archive.close()
 
     with open(os.path.join(arguments.out, "manifest.csv"), "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
