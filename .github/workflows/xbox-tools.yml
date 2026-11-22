@@ -70,6 +70,7 @@ jobs:
           done
           python3 tools/xbox/texture_test.py --exec build-xbox/exec --bilinear
           python3 tools/xbox/gs_test.py --exec build-xbox/exec
+          python3 tools/xbox/vs_test.py --exec build-xbox/exec
       - name: Pipeline capability guards
         run: python3 -I tools/xbox/pipeline_capability_test.py --exec "$XBOX_EXEC"
 
