@@ -82,7 +82,11 @@ HRESULT XGameStreamingInitialize_impl(void*) {
   return S_OK;
 }
 
-void XGameStreamingUninitialize_impl(void*) { g_initialized = false; }
+void XGameStreamingUninitialize_impl(void*) {
+  g_initialized = false;
+  std::lock_guard<std::mutex> lock(g_tokens_mutex);
+  g_live_tokens.clear();
+}
 
 uint8_t XGameStreamingIsStreaming_impl(void*) { return 0; }
 

@@ -388,6 +388,15 @@ static void CheckUninitialize() {
   Check(EveryHresultCallIs(kNotInitialized), "every HRESULT method returns E_GAMESTREAMING_NOT_INITIALIZED after XGameStreamingUninitialize");
   Check(Initialize() == S_OK && g_s1.At<GetClientsFn>(10, "XGameStreamingGetClients")(g_s1.self, 0, nullptr, nullptr) == S_OK,
         "XGameStreamingInitialize works again after XGameStreamingUninitialize");
+  auto reg = g_s1.At<RegisterConnectionFn>(12, "XGameStreamingRegisterConnectionStateChanged");
+  auto unreg = g_s1.At<UnregisterConnectionFn>(13, "XGameStreamingUnregisterConnectionStateChanged");
+  Token stale{}, fresh{};
+  Check(reg(g_s1.self, nullptr, nullptr, reinterpret_cast<void*>(&ConnectionCallback), &stale) == S_OK, "a registration before a second uninitialize is accepted");
+  Uninitialize();
+  Check(Initialize() == S_OK, "XGameStreamingInitialize works again a second time");
+  Check(reg(g_s1.self, nullptr, nullptr, reinterpret_cast<void*>(&ConnectionCallback), &fresh) == S_OK, "a registration after re-initialization is accepted");
+  Check(!unreg(g_s1.self, stale, FALSE) && unreg(g_s1.self, fresh, TRUE),
+        "XGameStreamingUninitialize drops its registrations: a token from before it answers false, a token issued after answers true");
   Uninitialize();
 }
 
