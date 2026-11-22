@@ -179,6 +179,25 @@ class MainTest(unittest.TestCase):
             self.run_main("--force")
         self.assertEqual(kept.read_bytes(), b"previous run")
 
+    def test_force_preserves_outputs_when_a_destination_is_a_directory(self):
+        self.archive.write_bytes(b"\x00")
+        vins = self.out / "vin"
+        vins.mkdir()
+        outputs = (self.bins / "1.bin", vins / "1.vin")
+        for blocked in (self.bins / "2.bin", vins / "2.vin", self.out / "manifest.csv"):
+            with self.subTest(blocked=blocked.name):
+                for path in outputs:
+                    path.write_bytes(b"previous run")
+                blocked.mkdir()
+                try:
+                    with self.assertRaises(SystemExit) as raised:
+                        self.run_main("--force")
+                    self.assertEqual(raised.exception.code, 2)
+                    for path in outputs:
+                        self.assertEqual(path.read_bytes(), b"previous run")
+                finally:
+                    blocked.rmdir()
+
     def test_force_preserves_outputs_when_archive_cannot_be_mapped(self):
         vins = self.out / "vin"
         vins.mkdir()
