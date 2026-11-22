@@ -350,7 +350,66 @@ def test_mixed_readfirstlane_and_scalar_sampler_web():
         got = struct.unpack('<32f', r[FIRST][:128])
         assert got == (want,) * 32, (selector, got[:4], want)
 
-TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web]
+def test_guarded_phi_image_table_dead_arm():
+    """SRT: index V# at 0, table ptr at 16, output V# at 32, sel0 at 48, sel1 at 52.
+    Two live table loads merge with a dead non-table arm that is guarded out before image_load."""
+    for sel0, sel1, want_val in ((1, 0, 111), (0, 1, 222), (0, 0, 7)):
+        p = rdna_asm.Program()
+        p.smem('s_load_dwordx4', 8, 4, 0)
+        p.smem('s_load_dwordx2', 12, 4, 16)
+        p.smem('s_load_dwordx4', 24, 4, 32)
+        p.smem('s_load_dword', 2, 4, 48)
+        p.smem('s_load_dword', 3, 4, 52)
+        p.sopp('s_waitcnt', 0)
+        p.smem('s_buffer_load_dword', 29, 8, 0)
+        p.smem('s_buffer_load_dword', 30, 8, 4)
+        p.sopp('s_waitcnt', 0)
+        p.sop1('s_mov_b32', 16, rdna_asm.EXEC_LO)
+        for r in range(17, 24):
+            p.sop1('s_mov_b32', r, 0)
+        p.sopc('s_cmp_eq_u32', 's2', 0)
+        try_second = p.branch_fwd('s_cbranch_scc1')
+        p.sop2('s_lshl_b32', 28, 's29', 5)
+        p.smem('s_load_dwordx8', 16, 12, 0, soffset='s28')
+        to_use = p.branch_fwd('s_branch')
+        p.patch_to_here(try_second)
+        p.sopc('s_cmp_eq_u32', 's3', 0)
+        to_alt = p.branch_fwd('s_cbranch_scc1')
+        p.sop2('s_lshl_b32', 28, 's30', 5)
+        p.smem('s_load_dwordx8', 16, 12, 0, soffset='s28')
+        p.patch_to_here(to_use)
+        p.sopp('s_waitcnt', 0)
+        p.vop1('v_mov_b32', 1, 'v0')
+        p.vop1('v_mov_b32', 2, 0)
+        p.mimg('image_load', 4, 1, 16, dmask=1)
+        p.sopp('s_waitcnt', 0)
+        p.vop2('v_lshlrev_b32', 5, 2, 'v0')
+        p.mubuf('buffer_store_dword', 4, 5, 24, 128, 0)
+        to_done = p.branch_fwd('s_branch')
+        p.patch_to_here(to_alt)
+        p.vop1('v_mov_b32', 4, 7)
+        p.vop2('v_lshlrev_b32', 5, 2, 'v0')
+        p.mubuf('buffer_store_dword', 4, 5, 24, 128, 0)
+        p.patch_to_here(to_done)
+        p.sopp('s_endpgm')
+        extra = [
+            "image 1 32 1 format 20 clear 111 0 0 0",
+            "image 2 32 1 format 20 clear 222 0 0 0",
+            "timg 2 0 1",
+            "timg 2 32 2",
+        ]
+        pokes = (
+            T.vsharp(0, 0, 1, 16)
+            + ["ptrlo 0 16 2", "ptrhi 0 20 2 0"]
+            + T.vsharp(0, 32, FIRST, 128)
+            + [f"poke 0 48 {sel0}", f"poke 0 52 {sel1}", "poke 1 0 0", "poke 1 4 1"]
+        )
+        regions = {0: (256, None), 1: (16, None), 2: (96, None), FIRST: (128, None)}
+        r = T.run(p.bytes(), regions, pokes, extra=extra)
+        got = struct.unpack('<32I', r[FIRST][:128])
+        assert got == (want_val,) * 32, (sel0, sel1, got[:4], want_val)
+
+TESTS = [test_loop_carried_index_from_buffer, test_scalar_index_from_buffer, test_waterfall_over_buffer_loaded_index, test_phi_multiple_offset_image_table, test_phi_same_heap_image_loads, test_table_image_with_sampler_phi, test_nested_pointer_phi_image_load, test_mixed_readfirstlane_and_scalar_sampler_web, test_guarded_phi_image_table_dead_arm]
 
 if __name__ == "__main__":
     bad = 0

@@ -744,18 +744,322 @@ private:
         pendingPhis.clear();
     }
 
+    static const IrValue* UnwrapGuardNot(const IrValue* value, bool& expected) {
+        value = value->Resolve();
+        while (value->Opcode() == IrOpcode::LogicalNot && value->ArgumentCount() == 1u) {
+            expected = !expected;
+            value = value->Argument(0)->Resolve();
+        }
+        return value;
+    }
+
+    static bool GuardProvablyFalse(const IrValue* value, bool expected) {
+        value = UnwrapGuardNot(value, expected);
+        if (value->HasImmediate() && value->Type() == IrType::Bool) {
+            return value->ImmediateBool() != expected;
+        }
+        if (expected && value->Opcode() == IrOpcode::LogicalAnd && value->ArgumentCount() == 2u) {
+            return GuardProvablyFalse(value->Argument(0), true) || GuardProvablyFalse(value->Argument(1), true);
+        }
+        if (!expected && value->Opcode() == IrOpcode::LogicalOr && value->ArgumentCount() == 2u) {
+            return GuardProvablyFalse(value->Argument(0), false) || GuardProvablyFalse(value->Argument(1), false);
+        }
+        return false;
+    }
+
+    struct GuardPredicate {
+        const IrValue* phi = nullptr;
+        bool isBool = true;
+        bool expectedBool = false;
+        std::uint32_t expectedU32 = 0u;
+        bool negate = false;
+
+        bool operator==(const GuardPredicate& other) const = default;
+        bool operator<(const GuardPredicate& other) const {
+            return std::tie(phi, isBool, expectedBool, expectedU32, negate) < std::tie(other.phi, other.isBool, other.expectedBool, other.expectedU32, other.negate);
+        }
+    };
+
+    static bool GuardImmediateU32(const IrValue* value, std::uint32_t& result) {
+        value = value->Resolve();
+        if (!value->HasImmediate() || value->Type() != IrType::U32) {
+            return false;
+        }
+        result = value->ImmediateU32();
+        return true;
+    }
+
+    static bool ParseBranchGuard(const IrValue* condition, bool branchValue, GuardPredicate& out) {
+        bool flipped = false;
+        condition = UnwrapGuardNot(condition, flipped);
+        const bool want = branchValue != flipped;
+        if (condition->IsPhi() && condition->Type() == IrType::Bool && condition->Parent() != nullptr) {
+            out = GuardPredicate{condition, true, want, 0u, false};
+            return true;
+        }
+        if ((condition->Opcode() == IrOpcode::IEqual32 || condition->Opcode() == IrOpcode::INotEqual32) && condition->ArgumentCount() == 2u) {
+            const IrValue* left = condition->Argument(0)->Resolve();
+            const IrValue* right = condition->Argument(1)->Resolve();
+            std::uint32_t imm = 0u;
+            const IrValue* phi = nullptr;
+            if (left->IsPhi() && left->Type() == IrType::U32 && left->Parent() != nullptr && GuardImmediateU32(right, imm)) {
+                phi = left;
+            } else if (right->IsPhi() && right->Type() == IrType::U32 && right->Parent() != nullptr && GuardImmediateU32(left, imm)) {
+                phi = right;
+            }
+            if (phi != nullptr) {
+                const bool isEqual = (condition->Opcode() == IrOpcode::IEqual32) == want;
+                out = GuardPredicate{phi, false, false, imm, !isEqual};
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool PredicateContradictsValue(const IrValue* value, const GuardPredicate& pred) {
+        if (pred.isBool) {
+            return GuardProvablyFalse(value, pred.expectedBool);
+        }
+        std::uint32_t imm = 0u;
+        if (GuardImmediateU32(value, imm)) {
+            return pred.negate ? (imm == pred.expectedU32) : (imm != pred.expectedU32);
+        }
+        return false;
+    }
+
+    static bool StepGuardPredicate(const IrValue* incoming, const GuardPredicate& pred, GuardPredicate& next) {
+        if (pred.isBool) {
+            bool edgeExpected = pred.expectedBool;
+            const IrValue* unwrapped = UnwrapGuardNot(incoming, edgeExpected);
+            if (unwrapped->IsPhi() && unwrapped->Type() == IrType::Bool && unwrapped->Parent() != nullptr) {
+                next = GuardPredicate{unwrapped, true, edgeExpected, 0u, false};
+                return true;
+            }
+            return false;
+        }
+        incoming = incoming->Resolve();
+        if (incoming->IsPhi() && incoming->Type() == IrType::U32 && incoming->Parent() != nullptr) {
+            next = pred;
+            next.phi = incoming;
+            return true;
+        }
+        return false;
+    }
+
+    struct BranchGuard {
+        std::size_t branchIndex = 0;
+        std::size_t edgeIndex = 0;
+        GuardPredicate predicate;
+    };
+
     bool TryMergePhiTableReads(IrValue& handle, std::uint32_t words, IrValue*& heapHandle, IrValue*& offset, std::uint32_t& first, bool& address, TableColumnPlan& plan, std::vector<std::pair<IrBlock*, IrValue*>>& pendingPhis) {
         std::unordered_map<const IrBlock*, std::size_t> order;
         const auto& blocks = m_program.BlockOrder();
         for (std::size_t index = 0; index < blocks.size(); index++) {
             order.emplace(blocks[index], index);
         }
-        std::map<std::vector<IrValue*>, IrValue*> memo;
+
+        std::vector<IrBlock*> rpo;
+        std::unordered_map<const IrBlock*, std::size_t> rpoIndex;
+        std::vector<std::size_t> domEnter;
+        std::vector<std::size_t> domLeave;
+        if (!blocks.empty()) {
+            std::unordered_set<const IrBlock*> visited;
+            std::vector<std::pair<IrBlock*, std::size_t>> stack{{blocks.front(), 0u}};
+            visited.insert(blocks.front());
+            while (!stack.empty()) {
+                auto& [current, next] = stack.back();
+                if (next < current->Successors().size()) {
+                    IrBlock* succ = current->Successors()[next++];
+                    if (visited.insert(succ).second) stack.emplace_back(succ, 0u);
+                    continue;
+                }
+                rpo.push_back(current);
+                stack.pop_back();
+            }
+            std::reverse(rpo.begin(), rpo.end());
+            for (std::size_t i = 0; i < rpo.size(); ++i) rpoIndex.emplace(rpo[i], i);
+            constexpr std::size_t noDom = static_cast<std::size_t>(-1);
+            std::vector<std::size_t> idom(rpo.size(), noDom);
+            idom[0] = 0u;
+            const auto intersect = [&](std::size_t left, std::size_t right) {
+                while (left != right) {
+                    while (left > right) left = idom[left];
+                    while (right > left) right = idom[right];
+                }
+                return left;
+            };
+            for (bool changed = true; changed;) {
+                changed = false;
+                for (std::size_t pos = 1; pos < rpo.size(); ++pos) {
+                    std::size_t candidate = noDom;
+                    for (const IrBlock* pred : rpo[pos]->Predecessors()) {
+                        const auto found = rpoIndex.find(pred);
+                        if (found == rpoIndex.end() || idom[found->second] == noDom) continue;
+                        candidate = candidate == noDom ? found->second : intersect(candidate, found->second);
+                    }
+                    if (candidate != idom[pos]) {
+                        idom[pos] = candidate;
+                        changed = true;
+                    }
+                }
+            }
+            std::vector<std::vector<std::size_t>> children(rpo.size());
+            for (std::size_t pos = 1; pos < rpo.size(); ++pos) {
+                if (idom[pos] != noDom) children[idom[pos]].push_back(pos);
+            }
+            domEnter.assign(rpo.size(), 0u);
+            domLeave.assign(rpo.size(), 0u);
+            std::size_t clock = 0;
+            std::vector<std::pair<std::size_t, std::size_t>> dfs{{0u, 0u}};
+            domEnter[0] = clock++;
+            while (!dfs.empty()) {
+                auto& [node, next] = dfs.back();
+                if (next < children[node].size()) {
+                    const std::size_t child = children[node][next++];
+                    domEnter[child] = clock++;
+                    dfs.emplace_back(child, 0u);
+                    continue;
+                }
+                domLeave[node] = clock++;
+                dfs.pop_back();
+            }
+        }
+        const auto domIndex = [&](std::size_t a, std::size_t b) {
+            return domEnter[a] <= domEnter[b] && domLeave[b] <= domLeave[a];
+        };
+        const auto domBlock = [&](const IrBlock* a, const IrBlock* b) {
+            const auto fa = rpoIndex.find(a);
+            const auto fb = rpoIndex.find(b);
+            return fa != rpoIndex.end() && fb != rpoIndex.end() && domIndex(fa->second, fb->second);
+        };
+
+        std::vector<BranchGuard> branchGuards;
+        const auto& info = m_program.Metadata().blockInfo;
+        if (blocks.size() == info.size() && !rpo.empty()) {
+            std::unordered_map<std::uint32_t, const IrBlock*> byId;
+            byId.reserve(blocks.size());
+            for (std::size_t index = 0; index < blocks.size(); index++) {
+                byId.emplace(info[index].id, blocks[index]);
+            }
+            for (std::size_t index = 0; index < blocks.size(); index++) {
+                const auto& terminator = info[index].terminator;
+                if (terminator.kind != TerminatorKind::ConditionalBranch || terminator.loopHeader || info[index].condition == nullptr || terminator.trueBlock == terminator.falseBlock) {
+                    continue;
+                }
+                const auto brPos = rpoIndex.find(blocks[index]);
+                if (brPos == rpoIndex.end()) continue;
+                for (const auto& [target, branchValue] : {std::pair{terminator.trueBlock, true}, std::pair{terminator.falseBlock, false}}) {
+                    GuardPredicate pred;
+                    if (!ParseBranchGuard(info[index].condition, branchValue, pred) || !domBlock(pred.phi->Parent(), blocks[index])) {
+                        continue;
+                    }
+                    const auto found = byId.find(target);
+                    if (found == byId.end() || found->second->Predecessors().size() != 1u || found->second->Predecessors().front() != blocks[index]) {
+                        continue;
+                    }
+                    const auto edgePos = rpoIndex.find(found->second);
+                    if (edgePos == rpoIndex.end()) continue;
+                    branchGuards.push_back(BranchGuard{brPos->second, edgePos->second, pred});
+                }
+            }
+        }
+
+        std::vector<GuardPredicate> guardFacts;
+        const auto addFact = [&](const GuardPredicate& pred) {
+            if (guardFacts.size() >= 64u) return;
+            if (std::ranges::find(guardFacts, pred) == guardFacts.end()) {
+                guardFacts.push_back(pred);
+            }
+        };
+        const auto addDirectFactsFor = [&](const IrBlock* block) {
+            const auto pos = rpoIndex.find(block);
+            if (pos == rpoIndex.end()) return;
+            for (const auto& guard : branchGuards) {
+                if (domIndex(guard.edgeIndex, pos->second)) {
+                    addFact(guard.predicate);
+                }
+            }
+        };
+        if (handle.Parent() != nullptr) {
+            addDirectFactsFor(handle.Parent());
+            for (std::size_t index = 0; index < guardFacts.size(); index++) {
+                const GuardPredicate fact = guardFacts[index];
+                const IrBlock* condBlock = fact.phi->Parent();
+                if (condBlock == nullptr || fact.phi->PhiBlockCount() != condBlock->Predecessors().size()) continue;
+                const IrBlock* onlyPred = nullptr;
+                std::size_t liveCount = 0;
+                for (const IrBlock* pred : condBlock->Predecessors()) {
+                    const IrValue* incoming = PhiIncoming(*fact.phi, pred);
+                    if (incoming == nullptr || !PredicateContradictsValue(incoming, fact)) {
+                        onlyPred = pred;
+                        ++liveCount;
+                    }
+                }
+                if (liveCount == 1u && onlyPred != nullptr) {
+                    addDirectFactsFor(onlyPred);
+                    if (const IrValue* incoming = PhiIncoming(*fact.phi, onlyPred)) {
+                        GuardPredicate nextPred;
+                        if (StepGuardPredicate(incoming, fact, nextPred) && domBlock(nextPred.phi->Parent(), onlyPred)) {
+                            addFact(nextPred);
+                        }
+                    }
+                }
+            }
+        }
+
+        auto edgeContradictsFact = [&](auto& self, const IrBlock* pred, const IrBlock* block, const GuardPredicate& fact, std::uint32_t depth) -> bool {
+            if (depth == 0u || fact.phi == nullptr) return false;
+            const IrBlock* condBlock = fact.phi->Parent();
+            if (condBlock == nullptr) return false;
+            if (condBlock == block) {
+                const IrValue* incoming = PhiIncoming(*fact.phi, pred);
+                return incoming != nullptr && PredicateContradictsValue(incoming, fact);
+            }
+            const auto blockPos = rpoIndex.find(block);
+            const auto condPos = rpoIndex.find(condBlock);
+            if (blockPos == rpoIndex.end() || condPos == rpoIndex.end() || !domIndex(blockPos->second, condPos->second)) {
+                return false;
+            }
+            if (fact.phi->PhiBlockCount() != condBlock->Predecessors().size()) return false;
+            for (const IrBlock* gp : condBlock->Predecessors()) {
+                const IrValue* inVal = PhiIncoming(*fact.phi, gp);
+                if (inVal == nullptr) return false;
+                if (PredicateContradictsValue(inVal, fact)) continue;
+                GuardPredicate nextFact;
+                if (StepGuardPredicate(inVal, fact, nextFact) && self(self, pred, block, nextFact, depth - 1u)) continue;
+                bool ruledOut = false;
+                const auto gpPos = rpoIndex.find(gp);
+                if (gpPos != rpoIndex.end()) {
+                    for (const auto& guard : branchGuards) {
+                        if (domIndex(guard.edgeIndex, gpPos->second) && domIndex(blockPos->second, guard.branchIndex)) {
+                            if (self(self, pred, block, guard.predicate, depth - 1u)) {
+                                ruledOut = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!ruledOut) return false;
+            }
+            return true;
+        };
+
+        struct StateKey {
+            std::vector<IrValue*> tuple;
+            GuardPredicate guard;
+            bool useFacts = false;
+            bool operator<(const StateKey& other) const {
+                return std::tie(tuple, guard, useFacts) < std::tie(other.tuple, other.guard, other.useFacts);
+            }
+        };
+        std::map<StateKey, IrValue*> memo;
         std::unordered_map<IrValue*, IrValue*> invariantCache;
+        std::vector<const IrBlock*> visitingBlocks;
         bool initialized = false;
         constexpr std::size_t maxStates = 128u;
 
-        auto resolve = [&](auto& self, std::vector<IrValue*> tuple) -> IrValue* {
+        auto resolve = [&](auto& self, std::vector<IrValue*> tuple, const GuardPredicate& activeGuard) -> IrValue* {
             for (IrValue*& value : tuple) {
                 value = value->Resolve();
                 if (!value->IsPhi()) continue;
@@ -765,9 +1069,6 @@ private:
                     entry->second = invariant == nullptr ? value : invariant->Resolve();
                 }
                 value = entry->second;
-            }
-            if (const auto known = memo.find(tuple); known != memo.end()) {
-                return known->second;
             }
             const bool hasPhi = std::ranges::any_of(tuple, [](const IrValue* value) { return value->IsPhi(); });
             if (!hasPhi) {
@@ -803,9 +1104,6 @@ private:
                 }
                 return leafOffset;
             }
-            if (memo.size() >= maxStates) {
-                return nullptr;
-            }
             IrBlock* block = nullptr;
             std::size_t latest = 0;
             for (const IrValue* value : tuple) {
@@ -825,20 +1123,79 @@ private:
                     return nullptr;
                 }
             }
+            const bool allowFacts = std::ranges::find(visitingBlocks, block) == visitingBlocks.end();
+            GuardPredicate blockGuard;
+            if (activeGuard.phi != nullptr && activeGuard.phi->Parent() == block && activeGuard.phi->PhiBlockCount() == predecessors.size()) {
+                blockGuard = activeGuard;
+            } else if (allowFacts) {
+                for (const auto& fact : guardFacts) {
+                    if (fact.phi->Parent() == block && fact.phi->PhiBlockCount() == predecessors.size()) {
+                        blockGuard = fact;
+                        break;
+                    }
+                }
+            }
+            const StateKey key{tuple, blockGuard.phi != nullptr ? blockGuard : activeGuard, allowFacts && !guardFacts.empty()};
+            if (const auto known = memo.find(key); known != memo.end()) {
+                return known->second;
+            }
+            if (memo.size() >= maxStates) {
+                return nullptr;
+            }
             IrValue& phiOffset = m_program.CreateValue(IrOpcode::Phi, IrType::U32);
-            memo.emplace(tuple, &phiOffset);
+            memo.emplace(key, &phiOffset);
             pendingPhis.emplace_back(block, &phiOffset);
+            visitingBlocks.push_back(block);
+            std::size_t liveEdges = 0;
             for (IrBlock* predecessor : predecessors) {
+                GuardPredicate nextGuard = blockGuard.phi == nullptr ? activeGuard : GuardPredicate{};
+                bool edgeDead = false;
+                if (blockGuard.phi != nullptr) {
+                    const IrValue* incomingGuard = PhiIncoming(*blockGuard.phi, predecessor);
+                    if (incomingGuard != nullptr) {
+                        if (PredicateContradictsValue(incomingGuard, blockGuard)) {
+                            edgeDead = true;
+                        } else {
+                            GuardPredicate stepped;
+                            if (StepGuardPredicate(incomingGuard, blockGuard, stepped)) {
+                                nextGuard = stepped;
+                            }
+                        }
+                    }
+                }
+                if (!edgeDead && allowFacts) {
+                    for (const auto& fact : guardFacts) {
+                        if (edgeContradictsFact(edgeContradictsFact, predecessor, block, fact, 6u)) {
+                            edgeDead = true;
+                            break;
+                        }
+                    }
+                }
+                if (edgeDead) {
+                    phiOffset.AddPhiOperand(predecessor, &m_builder.Constant(0u));
+                    continue;
+                }
+                ++liveEdges;
                 std::vector<IrValue*> incoming;
                 incoming.reserve(words);
                 for (IrValue* value : tuple) {
                     IrValue* edge = value->IsPhi() && value->Parent() == block ? PhiIncoming(*value, predecessor) : value;
-                    if (edge == nullptr) return nullptr;
+                    if (edge == nullptr) {
+                        visitingBlocks.pop_back();
+                        return nullptr;
+                    }
                     incoming.push_back(edge);
                 }
-                IrValue* edgeOffset = self(self, std::move(incoming));
-                if (edgeOffset == nullptr) return nullptr;
+                IrValue* edgeOffset = self(self, std::move(incoming), nextGuard);
+                if (edgeOffset == nullptr) {
+                    visitingBlocks.pop_back();
+                    return nullptr;
+                }
                 phiOffset.AddPhiOperand(predecessor, edgeOffset);
+            }
+            visitingBlocks.pop_back();
+            if (liveEdges == 0u) {
+                return nullptr;
             }
             return &phiOffset;
         };
@@ -848,7 +1205,7 @@ private:
         for (std::uint32_t dword = 0; dword < words; dword++) {
             root.push_back(handle.Argument(dword)->Resolve());
         }
-        offset = resolve(resolve, std::move(root));
+        offset = resolve(resolve, std::move(root), GuardPredicate{});
         if (offset == nullptr || !initialized) {
             DiscardPendingPhis(pendingPhis);
             plan.memory.clear();
