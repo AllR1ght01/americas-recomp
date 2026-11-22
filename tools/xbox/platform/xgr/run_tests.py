@@ -19,14 +19,25 @@ TEST_LIBS = ["advapi32.lib", "user32.lib", "ole32.lib", "shell32.lib", "runtimeo
 TIMEOUT = 300
 
 
-def run(cmd, env, cwd):
-    print(">", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, env=env, cwd=cwd)
-
-
-def annotate(name, line):
+def annotate(name, line, level="error"):
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("::error title=xgr %s::%s" % (name, line.replace("%", "%25").replace("\r", "").replace("\n", " ")), flush=True)
+        print("::%s title=xgr %s::%s" % (level, name, line.replace("%", "%25").replace("\r", "").replace("\n", " ")), flush=True)
+
+
+def run(cmd, env, cwd, name):
+    print(">", " ".join(cmd), flush=True)
+    p = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True, errors="replace")
+    print(p.stdout + p.stderr, flush=True)
+    if p.returncode:
+        errors = [l.strip() for l in (p.stdout + p.stderr).splitlines() if ": error" in l or ": fatal error" in l]
+        for l in errors[:20] or ["exit code %d" % p.returncode]:
+            annotate(name, l)
+    return p.returncode
+
+
+def fail(name, message):
+    annotate(name, message)
+    sys.exit(message)
 
 
 def run_test(exe, args, env, cwd):
@@ -48,21 +59,26 @@ def main():
     a = ap.parse_args()
     if os.name != "nt":
         sys.exit("run_tests.py builds with MSVC and runs Windows executables; run it on Windows.")
+    idl_dir = str(pathlib.Path(a.idl_dir).resolve())
     out = pathlib.Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    env = vc_env()
+    annotate("run_tests", "building into %s from the IDLs in %s" % (out, idl_dir), "notice")
+    try:
+        env = vc_env()
+    except Exception as e:
+        fail("setup", "no MSVC environment: %s" % e)
 
     py = [sys.executable, "-I"]
-    if subprocess.run(py + [str(HERE / "idl_table.py"), a.idl_dir, str(out / "table.json")]).returncode:
-        sys.exit("idl_table.py failed")
-    if subprocess.run(py + [str(HERE / "gen_stub.py"), str(out / "table.json"), str(out / "gen")]).returncode:
-        sys.exit("gen_stub.py failed")
+    if run(py + [str(HERE / "idl_table.py"), idl_dir, str(out / "table.json")], None, out, "idl_table.py"):
+        fail("idl_table.py", "making table.json failed")
+    if run(py + [str(HERE / "gen_stub.py"), str(out / "table.json"), str(out / "gen")], None, out, "gen_stub.py"):
+        fail("gen_stub.py", "generating the stub failed")
 
     sources = [str(out / "gen" / "xgr_stub.cpp")] + sorted(glob.glob(str(RUNTIME / "*.cpp"))) + sorted(glob.glob(str(RUNTIME / "gtx" / "*.cpp")))
     dll = ["cl", "/nologo", "/LD", "/O2", "/EHsc", "/std:c++20", "/DXGR_WITH_RUNTIME", "/I", str(RUNTIME), "/Fo:" + str(out) + "\\"] + sources
     dll += ["/Fe:" + str(out / "xgameruntime.dll"), "/link", "/DEF:" + str(out / "gen" / "xgameruntime.def")] + DLL_LIBS
-    if run(dll, env, out).returncode:
-        sys.exit("building xgameruntime.dll failed")
+    if run(dll, env, out, "xgameruntime.dll"):
+        fail("xgameruntime.dll", "building xgameruntime.dll failed")
 
     tests = sorted(pathlib.Path(p) for p in glob.glob(str(HERE / "test_*.cpp")))
     if a.only:
@@ -73,8 +89,7 @@ def main():
         objdir = out / "obj" / name
         objdir.mkdir(parents=True, exist_ok=True)
         cmd = ["cl", "/nologo", "/EHsc", "/std:c++20", "/Fo:" + str(objdir) + "\\", str(src), "/Fe:" + str(out / (name + ".exe")), "/link"] + TEST_LIBS
-        if run(cmd, env, out).returncode:
-            annotate(name, "build failed")
+        if run(cmd, env, out, name):
             results.append((name, "build failed", 0, 0.0))
             continue
         runs = [[]] + ([["reopen"]] if name == "test_save" else [])
