@@ -1166,3 +1166,120 @@ def validate_rehydrated_bvh(
         max_depth=max_depth,
         root_aabb=root_aabb,
     )
+
+
+@dataclass(frozen=True)
+class TriangleHit:
+    t: float
+    node_id: int
+    geometry_index: int
+    primitive_index: int
+
+
+def _ray_box_entry(origin, direction, bounds, t_min, t_max):
+    for axis, (o, d) in enumerate(zip(origin, direction)):
+        low, high = bounds[axis], bounds[axis + 3]
+        if d == 0:
+            if not low <= o <= high:
+                return None
+            continue
+        a, b = (low - o) / d, (high - o) / d
+        t_min = max(t_min, min(a, b))
+        t_max = min(t_max, max(a, b))
+        if t_min > t_max:
+            return None
+    return t_min
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _ray_triangle_t(origin, direction, vertices):
+    a, b, c = (vertices[i:i + 3] for i in (0, 3, 6))
+    ab = tuple(y - x for x, y in zip(a, b))
+    ac = tuple(y - x for x, y in zip(a, c))
+    p = _cross(direction, ac)
+    det = _dot(ab, p)
+    if det == 0:
+        return None
+    oa = tuple(o - x for o, x in zip(origin, a))
+    u = _dot(oa, p) / det
+    if not 0 <= u <= 1:
+        return None
+    q = _cross(oa, ab)
+    v = _dot(direction, q) / det
+    if not 0 <= v <= 1 - u:
+        return None
+    return _dot(ac, q) / det
+
+
+def trace_blas(
+    buf: bytes,
+    origin: Tuple[float, float, float],
+    direction: Tuple[float, float, float],
+    t_min: float = 0.0,
+    t_max: float = math.inf,
+) -> Optional[TriangleHit]:
+    """Trace a two-sided ray through a rehydrated triangle BLAS in stored coordinates.
+
+    The ray is origin + t * direction over the inclusive interval [t_min, t_max].
+    This is a geometric reference for structurally valid buffers. Equal hits
+    select the lower node ID.
+    """
+    if (len(origin) != 3 or len(direction) != 3 or not all(map(math.isfinite, (*origin, *direction)))
+            or not any(direction) or not math.isfinite(t_min) or not 0 <= t_min <= t_max):
+        raise ValueError("Invalid ray or ray interval")
+    header = parse_bvh_header(buf)
+    if header.is_compressed or not header.is_blas or header.total_bytes > len(buf):
+        raise ValueError("Expected a complete rehydrated BLAS")
+
+    hit = None
+    visited = set()
+    stack = [(header.root_node_id, t_min)]
+    while stack:
+        node_id, entry = stack.pop()
+        if node_id == INVALID_NODE or entry > t_max:
+            continue
+        node_type = node_id & 7
+        offset = (node_id >> 3) << 6
+        size = 128 if node_type == NODE_TYPE_BOX32 else 64
+        if offset < header.offset_to_leaves or offset + size > header.total_bytes:
+            raise ValueError(f"BVH node 0x{node_id:x} is out of bounds")
+        if node_id in visited:
+            raise ValueError(f"Repeated BVH node 0x{node_id:x}")
+        visited.add(node_id)
+
+        if node_type in (NODE_TYPE_BOX16, NODE_TYPE_BOX32):
+            children = struct.unpack_from("<4I", buf, offset)
+            fmt = "<6e" if node_type == NODE_TYPE_BOX16 else "<6f"
+            stride = struct.calcsize(fmt)
+            for slot, child in enumerate(children):
+                if child == INVALID_NODE:
+                    continue
+                bounds = struct.unpack_from(fmt, buf, offset + 16 + slot * stride)
+                child_entry = _ray_box_entry(origin, direction, bounds, t_min, t_max)
+                if child_entry is not None:
+                    stack.append((child, child_entry))
+        elif node_type in (NODE_TYPE_TRI0, NODE_TYPE_TRI1):
+            triangle = node_type == NODE_TYPE_TRI1
+            geometry_flags, primitive0, primitive1 = struct.unpack_from("<3I", buf, offset + 48)
+            primitive = primitive1 if triangle else primitive0
+            if primitive == INVALID_NODE:
+                raise ValueError(f"BVH node 0x{node_id:x} has no triangle")
+            vertices = struct.unpack_from("<9f", buf, offset + 12 * triangle)
+            t = _ray_triangle_t(origin, direction, vertices)
+            if t is not None and t_min <= t <= t_max and (
+                hit is None or (t, node_id) < (hit.t, hit.node_id)
+            ):
+                hit = TriangleHit(t, node_id, geometry_flags >> 8, primitive)
+                t_max = t
+        else:
+            raise ValueError(f"Unsupported BVH node type {node_type}")
+    return hit
