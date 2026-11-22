@@ -18,6 +18,7 @@ bool IsRuntimeUniformOp(IrOpcode opcode);
 bool HoldsFoldableValue(IrValue* value, std::uint32_t depth);
 
 bool ActiveMaskImplies(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition);
+bool ActiveMaskDisjoint(const IrResourcePlan& program, const IrValue* mask, const IrValue* condition);
 
 inline bool ActiveMaskImplies(const IrResourcePlan& program, IrValue* mask, IrValue* condition) {
     return ActiveMaskImplies(program, static_cast<const IrValue*>(mask), static_cast<const IrValue*>(condition));
@@ -35,6 +36,24 @@ template<typename TNode>
 requires (!std::is_pointer_v<std::decay_t<TNode>>)
 bool ActiveMaskImplies(const IrResourcePlan& program, const TNode& mask, const TNode& condition) {
     return ActiveMaskImplies(program, mask.Value(), condition.Value());
+}
+
+inline bool ActiveMaskDisjoint(const IrResourcePlan& program, IrValue* mask, IrValue* condition) {
+    return ActiveMaskDisjoint(program, static_cast<const IrValue*>(mask), static_cast<const IrValue*>(condition));
+}
+
+inline bool ActiveMaskDisjoint(const IrResourcePlan& program, const IrValue* mask, IrValue* condition) {
+    return ActiveMaskDisjoint(program, mask, static_cast<const IrValue*>(condition));
+}
+
+inline bool ActiveMaskDisjoint(const IrResourcePlan& program, IrValue* mask, const IrValue* condition) {
+    return ActiveMaskDisjoint(program, static_cast<const IrValue*>(mask), condition);
+}
+
+template<typename TNode>
+requires (!std::is_pointer_v<std::decay_t<TNode>>)
+bool ActiveMaskDisjoint(const IrResourcePlan& program, const TNode& mask, const TNode& condition) {
+    return ActiveMaskDisjoint(program, mask.Value(), condition.Value());
 }
 
 }
