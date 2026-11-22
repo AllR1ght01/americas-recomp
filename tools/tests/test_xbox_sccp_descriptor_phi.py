@@ -121,7 +121,7 @@ _BIND = (
 
 
 class SccpDescriptorPhiPruningTest(unittest.TestCase):
-    def _run_driver(self, code_bytes):
+    def _run_driver(self, code_bytes, env=None):
         driver = _find_driver()
         if not driver:
             self.skipTest("driver binary not built (set XBOX_DRIVER or build tools/xbox)")
@@ -131,7 +131,7 @@ class SccpDescriptorPhiPruningTest(unittest.TestCase):
             spv_path = Path(tmp) / "out.spv"
             code_path.write_bytes(code_bytes)
             bind_path.write_text(_BIND, encoding="utf-8")
-            proc = subprocess.run([driver, str(code_path), "32", str(spv_path), str(bind_path), "1", "cs"], capture_output=True, text=True, timeout=30)
+            proc = subprocess.run([driver, str(code_path), "32", str(spv_path), str(bind_path), "1", "cs"], capture_output=True, text=True, timeout=30, env=env)
             val_ok = True
             val_err = ""
             if proc.returncode == 0:
@@ -148,8 +148,14 @@ class SccpDescriptorPhiPruningTest(unittest.TestCase):
         self.assertTrue(val_ok, val_err)
 
     def test_reachable_garbage_descriptor_rejected(self):
-        rc, _, _, _ = self._run_driver(_reachable_garbage_descriptor_shader())
+        # With image atomics split over descriptor Phis (XBOX_NO_ATOMIC_SPLIT unset) the garbage arm is kept as its own copy and the
+        # program compiles; without the split the live garbage arm must still make the compile fail, not be pruned away.
+        env = dict(os.environ, XBOX_NO_ATOMIC_SPLIT="1")
+        rc, _, _, _ = self._run_driver(_reachable_garbage_descriptor_shader(), env=env)
         self.assertNotEqual(rc, 0)
+        rc, out, val_ok, val_err = self._run_driver(_reachable_garbage_descriptor_shader())
+        if rc == 0:
+            self.assertTrue(val_ok, val_err)
 
 
 if __name__ == "__main__":
