@@ -151,7 +151,7 @@ python tools/xbox/exec_bvh_tests.py
 python tools/xbox/desc_chain_tests.py
 ```
 
-The standalone tests (`mad_legacy_clamp_test.py`, `permlane_test.py`,
+The standalone tests (`mad_legacy_clamp_test.py`, `mad_legacy_fused_test.py`, `permlane_test.py`,
 `quadmask_test.py`, `quad_test.py`) take `--exec "build-xbox/exec.exe"` and resolve
 it themselves. The pixel tests (`texture_test.py`, `interpolation_test.py`,
 `per_vertex_test.py`, `pixel_smoke.py`) also need the SDK's `glslangValidator` on
@@ -180,6 +180,22 @@ One 32-lane workgroup computes `2.0 * 4.0 + 4.0`, `-2.0 * 4.0 + 4.0` and
 `0.5 * 0.5 + 0.0` with `v_mad_legacy_f32` and the VOP3 clamp bit. The clamped
 results must be 1.0, 0.0 and 0.25 in every lane. Clearing the clamp bit produces
 12.0, -4.0 and 0.25, so the test fails when clamp is ignored.
+
+### Test fused v_mad_legacy_f32 and v_mac_legacy_f32
+
+With the execution harness built, run:
+
+```powershell
+python tools/xbox/mad_legacy_fused_test.py --exec "build-xbox/exec.exe"
+```
+
+One 32-lane workgroup computes, with `v_mad_legacy_f32`, the two discriminator rows of
+boykopovar/AnyPS5#1281, `(1 + 2^-12)^2 - 1` and `max * 2 - max`, its two
+denormal-flush rows `+tiny * 1 + -0` and `-tiny * 1 + -0`, and the zero rule
+`+0 * +inf + 1`; then the first row again with `v_mac_legacy_f32`. The recompiler runs
+twice. By default the discriminator rows must equal `v_fma_f32` (`3A000400`,
+`7F7FFFFF`); with `XBOX_NO_FUSED_LEGACY_MAD=1` the product is rounded first
+(`3A000000`, `7F800000`). The flush rows give +0 and the zero-rule row 1.0 either way.
 
 ### Test v_permlane16 and v_permlanex16
 
