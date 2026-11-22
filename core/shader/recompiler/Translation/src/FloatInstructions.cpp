@@ -1,6 +1,7 @@
 #include "Translation/TranslationContext.hpp"
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace ShaderRecompiler {
@@ -816,6 +817,12 @@ bool TranslationContext::vFmaLegacyF32(const RdnaInstruction& inst, bool accumul
     const auto factor = [&](IrValue* value) { return &ir.Emit(IrOpcode::SelectF32, IrType::F32, {&zero.Value(), &ir.ConstantF32(0.0f), value}); };
     IrValue* lhsFactor = factor(lhs);
     IrValue* rhsFactor = factor(rhs);
+    static const bool fused = std::getenv("XBOX_NO_FUSED_LEGACY_MAD") == nullptr;
+    if (fused) {
+        IrValue* sum = &ir.Emit(IrOpcode::FPFma32, IrType::F32, {lhsFactor, rhsFactor, addend});
+        writeOperand(inst.destination, nanResultF32({lhsFactor, rhsFactor, addend}, sum, &invalidProductF32(lhsFactor, rhsFactor)));
+        return true;
+    }
     IrValue* product = &flushTinyProduct(lhsFactor, rhsFactor, &ir.Emit(IrOpcode::FPMul32, IrType::F32, {lhsFactor, rhsFactor}), nullptr, false).Value();
     const IrU1 zeroSum(ir.LogicalAnd(isZero(product).Value(), isZero(addend).Value()));
     IrValue& zeroSumBits = ir.BitwiseAnd(ir.BitwiseAnd(ir.BitCastU32(*product), ir.BitCastU32(*addend)), ir.Constant(0x80000000u));

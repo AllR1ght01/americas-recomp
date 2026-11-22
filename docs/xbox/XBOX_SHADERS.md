@@ -21,6 +21,7 @@ Status of the `xbox-series` branch. Everything here comes from one title's `shad
 | File | Change | Why |
 |---|---|---|
 | `RdnaVectorOpDecoder.cpp` | allow `clamp` on `v_mad_legacy_f32` (VOP3) | Xbox shaders use it; opcode was already supported, only the clamp bit was refused. Clamp semantics not verified. |
+| `FloatInstructions.cpp` | `v_mad_legacy_f32` (VOP3 0x140) and `v_mac_legacy_f32` (VOP2 0x06) are fused; `XBOX_NO_FUSED_LEGACY_MAD=1` restores rounding the product first | RDNA2 desktop hardware (RX 6700 XT, gfx1031, measured in boykopovar/AnyPS5#1281) runs 0x140 as `v_fma_legacy_f32`: bit-exact with `v_fma_f32`, with the zero rule and denormal flush of `v_mad_legacy_f32`. The recompiler had the gfx1010 (PS5) rounding. VOP2 0x06 follows the 0x140 measurement and LLVM's gfx10.3 decoding (`v_fmac_legacy_f32`). NaN results are unchanged. **The Series X GPU is not measured.** `tools/xbox/mad_legacy_fused_test.py` |
 | `RdnaVectorOpDecoder.cpp` | allow op_sel bits 2-3 on `v_permlane16/x16_b32` | Xbox shaders set op_sel[3]. Assumed to have no effect on a 32-bit op. **Unverified.** |
 | `RdnaVectorOpDecoder.cpp` | opcode/modifier numbers in two error messages | diagnostics |
 | `RoundingMode.cpp` | ignore `s_setreg*` writes to hwreg 20/21 (`FLAT_SCRATCH_LO/HI`) | Xbox shaders zero these at entry. Ignored, so a shader that really uses scratch via flat_scratch would be wrong. |

@@ -51,6 +51,7 @@ How to use all of it once the game executable is available: [`tools/xbox/platfor
 1. A lane-active select arm in waterfall loops is assumed active (`XBOX_NO_LANE_ASSUME` turns it off).
 2. Descriptor heap entries are assumed to be size-aligned (`XBOX_NO_OPAQUE_HEAP_INDEX` turns it off).
 3. Opt-in only: 16-bit interpolation ignores fp16 rounding bits (`XBOX_ALLOW_UNMEASURED_F16_INTERP`).
+4. `v_mad_legacy_f32` and `v_mac_legacy_f32` are fused, as measured on desktop RDNA2 (gfx1031), not on a Series X (`XBOX_NO_FUSED_LEGACY_MAD` turns it off).
 
 ## Where to look
 - [`docs/xbox/XBOX_SHADERS.md`](docs/xbox/XBOX_SHADERS.md): full write-up, harness defaults, history of the failure classes.
