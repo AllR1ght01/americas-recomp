@@ -51,17 +51,28 @@ void remapIds(std::vector<std::uint32_t>& values, const std::vector<std::uint32_
 }
 
 void rebuildPredecessors(ControlFlowGraph& graph) {
-    for (auto& block : graph.blocks) {
+    bool sequential = true;
+    for (std::size_t i = 0; i < graph.blocks.size(); ++i) {
+        auto& block = graph.blocks[i];
+        if (block.id != i) sequential = false;
         block.predecessors.clear();
-        sortUnique(block.successors);
+        auto& succ = block.successors;
+        if (succ.size() == 2u) {
+            if (succ[0] > succ[1]) std::swap(succ[0], succ[1]);
+            if (succ[0] == succ[1]) succ.pop_back();
+        } else if (succ.size() > 2u) {
+            sortUnique(succ);
+        }
     }
     for (const auto& block : graph.blocks) {
         for (const auto successor : block.successors) {
             graph.blocks[successor].predecessors.push_back(block.id);
         }
     }
-    for (auto& block : graph.blocks) {
-        sortUnique(block.predecessors);
+    if (!sequential) {
+        for (auto& block : graph.blocks) {
+            sortUnique(block.predecessors);
+        }
     }
 }
 
@@ -110,16 +121,58 @@ BasicBlock& ControlFlowGraph::FindBlockByProgramCounter(std::uint32_t programCou
 }
 
 bool ControlFlowGraph::Dominates(std::uint32_t dominator, std::uint32_t blockId) const {
+    if (domTree.valid && blocks.size() == domTree.tin.size() && blockId < domTree.tin.size() && dominator < domTree.tin.size()) {
+        return domTree.tin[dominator] <= domTree.tin[blockId] && domTree.tout[blockId] <= domTree.tout[dominator];
+    }
     const auto& dominators = FindBlock(blockId).dominators;
     return std::binary_search(dominators.begin(), dominators.end(), dominator);
 }
 
 bool ControlFlowGraph::PostDominates(std::uint32_t postDominator, std::uint32_t blockId) const {
+    if (pdomTree.valid && blocks.size() == pdomTree.tin.size() && blockId < pdomTree.tin.size() && postDominator < pdomTree.tin.size()) {
+        if (pdomTree.tin[blockId] == InvalidControlFlowId) {
+            return true;
+        }
+        if (pdomTree.tin[postDominator] == InvalidControlFlowId) {
+            return false;
+        }
+        return pdomTree.tin[postDominator] <= pdomTree.tin[blockId] && pdomTree.tout[blockId] <= pdomTree.tout[postDominator];
+    }
     const auto& postDominators = FindBlock(blockId).postDominators;
     return std::binary_search(postDominators.begin(), postDominators.end(), postDominator);
 }
 
 std::uint32_t ControlFlowGraph::FindNearestCommonPostDominator(std::uint32_t firstBlock, std::uint32_t secondBlock) const {
+    if (pdomTree.valid && blocks.size() == pdomTree.tin.size() && firstBlock < pdomTree.tin.size() && secondBlock < pdomTree.tin.size()) {
+        const bool firstUnreached = pdomTree.tin[firstBlock] == InvalidControlFlowId;
+        const bool secondUnreached = pdomTree.tin[secondBlock] == InvalidControlFlowId;
+        if (firstUnreached && secondUnreached) {
+            for (std::uint32_t id = 0; id < pdomTree.tin.size(); ++id) {
+                if (pdomTree.tin[id] == InvalidControlFlowId) {
+                    return id;
+                }
+            }
+            return InvalidControlFlowId;
+        }
+        if (firstUnreached) {
+            return secondBlock;
+        }
+        if (secondUnreached) {
+            return firstBlock;
+        }
+        std::uint32_t left = firstBlock;
+        std::uint32_t right = secondBlock;
+        while (pdomTree.depth[left] > pdomTree.depth[right]) left = pdomTree.parent[left];
+        while (pdomTree.depth[right] > pdomTree.depth[left]) right = pdomTree.parent[right];
+        while (left != right) {
+            if (pdomTree.parent[left] == left) {
+                return InvalidControlFlowId;
+            }
+            left = pdomTree.parent[left];
+            right = pdomTree.parent[right];
+        }
+        return left;
+    }
     const auto& first = FindBlock(firstBlock);
     const auto& second = FindBlock(secondBlock);
     if (first.immediatePostDominator != InvalidControlFlowId && second.immediatePostDominator != InvalidControlFlowId) {
