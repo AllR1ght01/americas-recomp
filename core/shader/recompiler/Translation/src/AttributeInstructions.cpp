@@ -107,14 +107,15 @@ std::uint32_t TranslationContext::interpolationModeF16(const RdnaInstruction& in
     const auto mode = floatMode->floatMode;
     const auto denorm32 = (mode >> 4u) & 3u;
     const auto denorm16 = (mode >> 6u) & 3u;
-    // XBOX-FORK (approximation, opt-in with XBOX_ALLOW_UNMEASURED_F16_INTERP=1): Xbox pixel shaders set fp16/fp64 rounding to
-    // round-toward-zero in MODE; 16-bit interpolation under non-default rounding has no measured behaviour. When enabled the rounding
-    // bits are ignored, so f16 interpolants may differ in the last bit from hardware. Default is to refuse, as upstream does.
+    // The p1 instructions round their f32 result with the f32 field. Only p2 uses the f16 field.
     static const bool allowRounding = std::getenv("XBOX_ALLOW_UNMEASURED_F16_INTERP") != nullptr;
-    if ((!allowRounding && (mode & 0xfu) != 0u) || (denorm32 != 0u && denorm32 != 3u) || (denorm16 != 0u && denorm16 != 3u)) {
+    const bool halfResult = inst.op == RdnaOpcode::VInterpP2F16;
+    if ((!allowRounding && !halfResult && (mode & 3u) != 0u) || (denorm32 != 0u && denorm32 != 3u) || (denorm16 != 0u && denorm16 != 3u)) {
         throw std::runtime_error("16-bit interpolation at pc " + std::to_string(inst.programCounter) + " in FLOAT_MODE " + std::to_string(mode) + " is not measured");
     }
-    return (floatMode->ieeeMode ? InterpolationQuiet : 0u) | (denorm32 == 0u ? InterpolationFlush32 : 0u) | (denorm16 == 0u ? InterpolationFlush16 : 0u);
+    const std::uint32_t rounding16 = halfResult && !allowRounding ? (mode >> 2u) & 3u : 0u;
+    return (floatMode->ieeeMode ? InterpolationQuiet : 0u) | (denorm32 == 0u ? InterpolationFlush32 : 0u) |
+           (denorm16 == 0u ? InterpolationFlush16 : 0u) | (rounding16 << InterpolationRound16Shift);
 }
 
 void TranslationContext::vInterpP1F16(const RdnaInstruction& inst) {
