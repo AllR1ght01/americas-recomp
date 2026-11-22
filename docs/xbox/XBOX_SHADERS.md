@@ -457,3 +457,20 @@ Reads and stores were split over descriptor Phis; image atomics were not, so an 
 atomic once, and the returned pre-op value is selected from the lane's arm. `XBOX_NO_ATOMIC_SPLIT=1` turns it off. 64-bit atomics are
 not split. Result at 6a9417f8a6 (Mac, `run_full.py` classification): compute 24774 and pixel 19845, 21239, 21396, 21416, 21436, 21450,
 21464 THROW -> VALID, no other shader changes. `spirv-val` only, not executed.
+
+## Descriptor webs: equivalent reloads, states and depth
+36 mesh and 3 vertex shaders choose a sampler per lane: `ReadFirstLane` of a Phi web whose selects test the lane's bit of an exec
+mask or ballot (`SelectU32(ULessThan32(LaneId, 32), low word, high word) >> (LaneId & 31) & 1`). Their descriptor webs gave up at
+512 states ("descriptor web: more than 512 descriptor states") while choosing among only 3 to 40 descriptors. The web keyed its
+states on the exact IR values of a descriptor tuple, but merged its arms with `EquivalentValue`, so two reloads of the same SRT
+dwords made two states. Leaf values are now replaced by an equivalent representative before the state lookup (`CanonicalLeaf` in
+`ResourceTracker.cpp`), which leaves about a third of the states (the largest mesh web: 6,481 -> 2,233).
+- The state limit is 8,192. The old limit of 512 also bounded the recursion depth of `WebSelector`; with only the state limit
+  raised, a linear chain of 2,500 joins overflowed the stack. The depth is now its own limit of 512 joins ("descriptor web: nested
+  more than 512 joins deep"). The largest web in the corpus needs 3,966 states at a depth of 68.
+- Tests: `tools/tests/test_xbox_descriptor_webs.py` (`ShaderMemory.cpp`'s split-reload program: 260 joins plan their 4 T#s, 600
+  joins are refused at the depth limit). `ShaderMemory.cpp` itself now expects the same.
+
+Result (whole corpus at `3dab00a088`, 20 workers, 120 s): mesh 9,245 -> 9,281 of 9,282, vertex 2,233 -> 2,236 of 2,236, no other
+change and no valid shader lost; no shader compiles more than twice as slowly. The one compute shader whose failure also
+mentions `ReadFirstLane` (24211) fails on an image address chain, a different class. `spirv-val` only, not executed.
