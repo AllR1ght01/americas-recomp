@@ -505,6 +505,13 @@ static void CheckGameUi() {
     HRESULT result = ui.At<HRESULT (*)(void*, AsyncBlock*, uint32_t, uint64_t*, uint32_t*)>(13, "XGameUiShowPlayerPickerResult")(ui.self, &b, 2, out, nullptr);
     Check(countHr == E_ABORT, "XGameUiShowPlayerPickerResultCount reports E_ABORT");
     CheckAborted(begin, &b, result, "XGameUiShowPlayerPickerAsync");
+    auto picker = ui.At<HRESULT (*)(void*, AsyncBlock*, void*, const char*, uint32_t, const uint64_t*, uint32_t, const uint64_t*, uint32_t, uint32_t)>(
+        11, "XGameUiShowPlayerPickerAsync");
+    AsyncBlock bad{};
+    Check(picker(ui.self, &bad, handle, "Pick", 2, players, 1, nullptr, 1, 1) == E_INVALIDARG,
+          "XGameUiShowPlayerPickerAsync rejects a pre-selection count without a list, also with no UI callbacks set");
+    Check(picker(ui.self, &bad, handle, "Pick", 2, nullptr, 0, nullptr, 1, 1) == E_INVALIDARG,
+          "XGameUiShowPlayerPickerAsync rejects a select-from count without a list");
   }
   {
     AsyncBlock b{};
