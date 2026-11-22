@@ -388,6 +388,35 @@ call error to the tail jump. It was not kept. Translating them needs an ES-half 
 the GS input layout, and the jump ends the stage. Both halves must agree on the ESGS layout, so this is a pipeline-level change,
 not a per-shader fix.
 
+## Vertex export halves of legacy GS pipelines (sixth harness gap)
+The 195 merged VS above are now compiled as a vertex stage that feeds a geometry stage. 190 write an 8-dword ESGS item and 5 a
+4-dword one, at `lane * item bytes` plus a per-wave offset from s3 bits 24-27 (0 in the harness), then run `s_barrier` and
+`s_setpc_b64` into the GS half.
+- **Request.** A `Vertex` request with a `GeometryConfiguration` in `graphics` is the export half of that geometry pipeline
+  (`ExportsToGeometry`, Recompiler.cpp). Its decoded program ends at the barrier before the jump. The barrier only orders the item
+  writes before the GS half reads them, and the host pipeline orders the two stages itself.
+- **Item writes.** The tessellation lowering already turns a domain program's ESGS writes into `GeometryOutput` attributes when it
+  feeds the mesh-path geometry stage. It now does the same for a vertex stage, with `geometryItemDwords` from the configuration's
+  `esgsItemSize`, and the same check: an item write must be at `lane * 4 * esgsItemSize + c`. The emitter writes item dword `d` to
+  the slot the geometry stage reads it from: with `inputPosition`, dwords 0-3 go to `gl_Position`, and dword `d` >= 4 to component
+  `d % 4` of the vec4 output at location `d / 4 - 1`, bit-cast to float (the geometry stage reads `in_gs_param_<n>` the same way).
+  So the two halves agree on the ESGS layout without being paired: both follow the configuration's item size and slots.
+- **Fetch call.** The 158 with inputs call the fetch subroutine through s[12:13] after `s_inst_prefetch` and
+  `s_and_b32 s13, s13, 0xff`: the high user word carries other data above the 40-bit address. `isFetchCall` now accepts
+  `s_inst_prefetch` before the call, and a write to the target's high word that only masks it with a constant of 16 bits or less.
+- **Harness.** `run_full.esgs_item` recognizes the shape (last instructions `s_barrier`, `s_setpc_b64`) and takes the item size from
+  the lane multiplier of the LDS address (`v_mad_u32_u24 v, lane, <bytes>, s`). `driver.cpp` gets it as argument 8 and compiles the
+  VS as a merged program with user data from s8 (`userDataBaseRegister` 8, 32 words), so the entry sets s2/s3 as for the other
+  merged vertex programs (ES thread count = lanes), and with `inputAttributeCount` = item dwords / 4. `bindings.py` tracks s0-s39
+  for these VS (`export_half`); before, the table each of them reaches through s17 had no node.
+- Tests: `tools/tests/test_xbox_geometry_export.py` (synthetic programs: the outputs, the masked fetch call, a wrong item stride, and
+  the same program without a geometry stage).
+
+Result (on top of the fetch subroutine change, own corpus, 120 s): VS 2,031 -> 2,226 of 2,236, all 195 export halves, and no valid
+shader lost. Still failing: 5 buffer slots that the bindings fill with an image T#, 4 sampler chains, and 113. `spirv-val` only:
+nothing was executed, and pairing these with the 195 GS shaders for execution needs the pipeline state that says which export half
+goes with which GS.
+
 ## Corpus run time
 A cold mesh run (9,282 shaders, 14 workers) takes about 10 minutes and is bound by total CPU time, not by scheduling: about 8,200
 worker-seconds, of which the ~30 shaders that hit the 120 s limit are 44%; the median shader takes 0.16 s (driver start + spirv-val).

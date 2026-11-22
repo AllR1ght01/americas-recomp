@@ -157,8 +157,13 @@ private:
     }
 
     static void appendGeometry(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
-        if (request.shader.stage != ShaderStage::Geometry) return;
         const auto* geometry = request.graphics && request.graphics->geometry ? &*request.graphics->geometry : nullptr;
+        if (request.shader.stage == ShaderStage::Vertex && geometry != nullptr) {
+            for (const auto value : {0x65736773u, geometry->esgsItemSize, geometry->inputAttributeCount}) append(key, value);
+            append(key, geometry->inputPosition);
+            return;
+        }
+        if (request.shader.stage != ShaderStage::Geometry) return;
         append(key, geometry != nullptr);
         if (geometry == nullptr) return;
         for (const auto value : {geometry->inputPrimitive, geometry->outputTopology, geometry->maxOutputVertices, geometry->invocations, geometry->esgsItemSize, geometry->gsvsVertexSize, geometry->gsvsOffsetDwords, geometry->inputAttributeCount, geometry->outputAttributeCount}) append(key, value);

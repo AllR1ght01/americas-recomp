@@ -859,7 +859,7 @@ class Lowering {
 public:
     Lowering(IrProgram& program, const ShaderTessellationInputInfo& tessellation, const TessellationTargetLimits* limits)
         : program(program), tessellation(tessellation), limits(limits), stage(program.Resources().stage), merged(stage == IrShaderStage::TessellationControl && tessellation.mergedHull),
-          capture(stage == IrShaderStage::TessellationEvaluation && tessellation.geometryItemDwords != 0u),
+          capture((stage == IrShaderStage::TessellationEvaluation || stage == IrShaderStage::Vertex) && tessellation.geometryItemDwords != 0u),
           evaluator(stage == IrShaderStage::TessellationControl ? tessellation.outputControlPoints : capture ? 1u : 0u, stage == IrShaderStage::Local ? LocalVertexIndexCount : static_cast<std::int64_t>(tessellation.patchesPerGroup), capture), localStride(program.Metadata().tessellationLocalStride) {}
 
     void Run() {
@@ -1205,7 +1205,7 @@ private:
             case TessellationAttribute::PatchOutput:
                 break;
             case TessellationAttribute::GeometryOutput:
-                if (address.vertex != 4 * static_cast<std::int64_t>(tessellation.geometryItemDwords) || address.relative != 0 || address.constant < 0 || end > address.vertex) Fail("the domain program writes LDS outside its vertex's ESGS item", access.pc);
+                if (address.vertex != 4 * static_cast<std::int64_t>(tessellation.geometryItemDwords) || address.relative != 0 || address.constant < 0 || end > address.vertex) Fail(stage == IrShaderStage::Vertex ? "the vertex program writes LDS outside its vertex's ESGS item" : "the domain program writes LDS outside its vertex's ESGS item", access.pc);
                 break;
             default:
                 break;
@@ -1720,7 +1720,8 @@ private:
 
 void TessellationLowering::Lower(IrProgram& program, const ShaderTessellationInputInfo& tessellation, const TessellationTargetLimits* limits) const {
     const auto stage = program.Resources().stage;
-    if (stage != IrShaderStage::Local && stage != IrShaderStage::TessellationControl && stage != IrShaderStage::TessellationEvaluation) return;
+    const bool geometryExport = stage == IrShaderStage::Vertex && tessellation.geometryItemDwords != 0u;
+    if (stage != IrShaderStage::Local && stage != IrShaderStage::TessellationControl && stage != IrShaderStage::TessellationEvaluation && !geometryExport) return;
     Lowering(program, tessellation, limits).Run();
 }
 

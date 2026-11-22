@@ -270,8 +270,9 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             if (target.outputPrimitiveSize == 1u) vertexStorage.pointList = true;
             target.capturedInput = tessellation != nullptr;
         }
-        if (stage == ShaderStageKind::Geometry) {
+        if (stage == ShaderStageKind::Geometry || (stage == ShaderStageKind::Vertex && geometry != nullptr)) {
             _validateGeometry(geometry);
+            if (stage == ShaderStageKind::Vertex) vertexStorage.tess.geometryItemDwords = geometry->esgsItemSize;
             auto& target = vertexStorage.geometry;
             target.inputPrimitive = geometry->inputPrimitive;
             target.outputTopology = geometry->outputTopology;
@@ -341,7 +342,7 @@ void ValidateVertexStageInputs(ShaderStageKind stage, const GuestContext& contex
     if (stage == ShaderStageKind::Mesh) {
         _validateMesh(mesh);
     }
-    if (stage == ShaderStageKind::Geometry) {
+    if (stage == ShaderStageKind::Geometry || (stage == ShaderStageKind::Vertex && geometry != nullptr)) {
         _validateGeometry(geometry);
     }
 }

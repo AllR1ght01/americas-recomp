@@ -1112,9 +1112,45 @@ std::uint32_t TessellationOuterFactors(const SpirvEmitterState& state) {
     return state.inputInfo.vertex->tess.domain == 2u ? 4u : 3u;
 }
 
+void DefineGeometryExportSlots(SpirvEmitterState& state) {
+    const auto& vertex = *state.inputInfo.vertex;
+    const auto& geom = vertex.geometry;
+    if (vertex.tess.geometryItemDwords > 4u * geom.inputAttributeCount) FailEmit("the ESGS item has more dwords than the geometry stage reads");
+    for (std::uint32_t slot = 0; slot < geom.inputAttributeCount; ++slot) {
+        if (slot == 0u && geom.inputPosition) {
+            const auto perVertex = state.module.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpDecorate, {spv::DecorationBlock}}}, TypeF32Vector(state, 4u));
+            state.geometryExportSlots.push_back(DefineInterfaceVariable(state, perVertex, spv::StorageClassOutput, "gl_PerVertex"));
+            continue;
+        }
+        const auto location = slot - (geom.inputPosition ? 1u : 0u);
+        const auto name = "out_es_param_" + std::to_string(location);
+        const auto variable = DefineInterfaceVariable(state, TypeF32Vector(state, 4u), spv::StorageClassOutput, name.c_str());
+        state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationLocation, location);
+        state.geometryExportSlots.push_back(variable);
+    }
+}
+
+std::uint32_t GeometryExportPointer(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
+    if (!inst.Argument(1)->HasImmediate()) ctx.Fail(inst, "writes its ESGS item at a computed offset");
+    const auto offset = inst.Argument(1)->ImmediateU32();
+    const auto slot = offset / 16u;
+    if (slot >= state.geometryExportSlots.size()) ctx.Fail(inst, "writes its ESGS item past the slots the geometry stage reads");
+    const auto component = ConstantU32(state, (offset / 4u) % 4u);
+    const auto pointer = state.module.AllocateId();
+    const auto type = TypePointer(state, spv::StorageClassOutput, TypeF32(state));
+    if (slot == 0u && state.inputInfo.vertex->geometry.inputPosition) {
+        state.module.AddFunction(spv::OpAccessChain, type, pointer, state.geometryExportSlots[slot], ConstantU32(state, 0u), component);
+    } else {
+        state.module.AddFunction(spv::OpAccessChain, type, pointer, state.geometryExportSlots[slot], component);
+    }
+    return pointer;
+}
+
 std::uint32_t TessellationPointer(SpirvValueEmitContext& ctx, const IrValue& inst) {
     auto& state = ctx.state;
     const auto kind = static_cast<TessellationAttribute>(inst.Argument(0)->ImmediateU32());
+    if (kind == TessellationAttribute::GeometryOutput && StageOf(state) == IrShaderStage::Vertex) return GeometryExportPointer(ctx, inst);
     const auto variable = state.tessVariables.at(static_cast<std::uint32_t>(kind));
     if (variable == 0u) {
         throw std::runtime_error("tessellation attribute has no interface variable");
@@ -1215,6 +1251,10 @@ void DefineTessellationInterfaces(SpirvEmitterState& state) {
             continue;
         }
         const auto kind = static_cast<TessellationAttribute>(index);
+        if (kind == TessellationAttribute::GeometryOutput && StageOf(state) == IrShaderStage::Vertex) {
+            DefineGeometryExportSlots(state);
+            continue;
+        }
         const bool input = kind == TessellationAttribute::ControlInput || kind == TessellationAttribute::EvaluationInput || kind == TessellationAttribute::PatchInput || kind == TessellationAttribute::InstanceInput;
         const bool patch = kind == TessellationAttribute::PatchOutput || kind == TessellationAttribute::PatchInput;
         const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
@@ -2362,6 +2402,11 @@ void EmitSetTessellationAttribute(SpirvValueEmitContext& ctx, const IrValue& ins
             state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMin, raised, TessellationLevelBound(state, TessellationLevel(state, 1u), GLSLstd450FMin, state.inputInfo.vertex->tess.partitioning == 2u ? 63.0f : 64.0f));
             value = state.module.AllocateId();
             state.module.AddFunction(spv::OpSelect, TypeF32(state), value, inside, clamped, outer ? floating : lowest);
+        }
+        if (inst.Argument(0)->ImmediateU32() == static_cast<std::uint32_t>(TessellationAttribute::GeometryOutput) && StageOf(ctx.state) == IrShaderStage::Vertex) {
+            const auto floating = ctx.state.module.AllocateId();
+            ctx.state.module.AddFunction(spv::OpBitcast, TypeF32(ctx.state), floating, value);
+            value = floating;
         }
         ctx.state.module.AddFunction(spv::OpStore, TessellationPointer(ctx, inst), value);
     });

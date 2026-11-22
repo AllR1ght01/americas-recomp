@@ -290,6 +290,7 @@ struct SpirvEmitterState {
     std::uint32_t perVertexVariable = 0;
     std::uint32_t geometryInputPerVertexVariable = 0;
     std::vector<std::uint32_t> geometryInputParameters;
+    std::vector<std::uint32_t> geometryExportSlots;
     std::uint32_t geometryEmitCountVariable = 0;
     std::uint32_t barycentricReciprocalWVariable = 0;
     std::uint32_t pointSizeVariable = 0;

@@ -447,7 +447,12 @@ bool onlyWritesLinkRegister(const RdnaInstruction& instruction, std::uint32_t li
 bool isFetchCallPrefixOpcode(const RdnaInstruction& instruction) {
     return IsScalarAluOpcode(instruction.op) || instruction.op == RdnaOpcode::SNop || instruction.op == RdnaOpcode::SWaitcnt ||
         instruction.op == RdnaOpcode::SWaitcntDepctr || instruction.op == RdnaOpcode::SWaitIdle || instruction.op == RdnaOpcode::SIcacheInv ||
-        instruction.op == RdnaOpcode::SSetprio || instruction.op == RdnaOpcode::SClause;
+        instruction.op == RdnaOpcode::SSetprio || instruction.op == RdnaOpcode::SClause || instruction.op == RdnaOpcode::SInstPrefetch;
+}
+
+bool masksAddressHigh(const RdnaInstruction& instruction, std::uint32_t high) {
+    return instruction.op == RdnaOpcode::SAndB32 && scalarIndex(instruction.destination) == high && scalarIndex(instruction.source0) == high &&
+        (instruction.source1.kind == RdnaOperandKind::LiteralConstant || instruction.source1.kind == RdnaOperandKind::IntegerInlineConstant) && instruction.source1.value <= 0xffffu;
 }
 
 std::uint32_t instructionIndexOfProgramCounter(const RdnaProgram& program, std::uint32_t programCounter) {
@@ -486,6 +491,7 @@ bool isFetchCall(const RdnaProgram& program, std::uint32_t index, const SwappcIn
         std::none_of(program.instructions.begin(), program.instructions.begin() + index + 1, [&](const RdnaInstruction& other) {
             // XBOX-FORK: `s_swappc_b64 sN, sN` reads its target before it writes the link, so the call's own link write does not make the target pair computed.
             if (&other == &instruction) return false;
+            if (masksAddressHigh(other, targetRegister + 1u)) return false;
             return writesScalar(other, targetRegister) || writesScalar(other, targetRegister + 1u);
         });
     return swappc != nullptr && swappc->fetchCallAllowed && positional && (userDataPair || outsideProgram);

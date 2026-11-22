@@ -120,12 +120,26 @@ bool CapturesGeometryInput(const RecompileRequest& request) {
     return request.shader.stage == ShaderStage::TessellationEvaluation && request.graphics && request.graphics->mesh;
 }
 
-RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint32_t> code, bool mergedHull, bool vertexHalf) {
+bool ExportsToGeometry(const RecompileRequest& request) {
+    return request.shader.stage == ShaderStage::Vertex && request.graphics && request.graphics->geometry;
+}
+
+RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint32_t> code, bool mergedHull, bool vertexHalf, bool geometryExport) {
     static constexpr std::array<std::uint32_t, 1> EndProgram{0xbf810000u};
     if (stage == ShaderStageKind::Local && mergedHull) {
         RdnaProgram program;
         program.code = EndProgram;
         program.instructions.push_back(DecodeRdnaInstruction(0u, EndProgram, 0u));
+        return program;
+    }
+    if (geometryExport) {
+        auto program = RdnaInstructionDecoder{}.Decode(code);
+        const auto last = std::ranges::find_if(program.instructions.rbegin(), program.instructions.rend(), [](const RdnaInstruction& instruction) { return instruction.op != RdnaOpcode::SEndpgm && instruction.op != RdnaOpcode::SCodeEnd; });
+        if (last == program.instructions.rend() || last->op != RdnaOpcode::SSetpcB64) throw std::runtime_error("a vertex program that feeds a geometry stage does not end with its s_setpc_b64 into that stage");
+        auto jump = std::prev(last.base());
+        if (jump != program.instructions.begin() && std::prev(jump)->op == RdnaOpcode::SBarrier) --jump;
+        *jump = DecodeRdnaInstruction(jump->programCounter, EndProgram, 0u);
+        program.instructions.erase(std::next(jump), program.instructions.end());
         return program;
     }
     if (vertexHalf) {
@@ -196,7 +210,7 @@ SharedVectorRegisters GuestSharedVectorRegisters(const GuestContext& context) {
 struct PreparedControlFlow {
     PreparedControlFlow(const RecompileRequest& request, const SwappcInfo& swappcInfo)
         : stage(request.shader.stage), mergedHull(MergedHullStage(request)), fallbacks(swappcInfo.linkedCallFallbacks.begin(), swappcInfo.linkedCallFallbacks.end()), swappc(WithFallbacks(swappcInfo, fallbacks)), code(request.shader.code.begin(), request.shader.code.end()),
-          vertexHalf(CapturesGeometryInput(request)), decoded(DecodeStageProgram(toShaderStageKind(request.shader.stage), code, mergedHull, vertexHalf)), cfg(GraphBuilder{}.Build(decoded, &swappc)) {
+          vertexHalf(CapturesGeometryInput(request)), geometryExport(ExportsToGeometry(request)), decoded(DecodeStageProgram(toShaderStageKind(request.shader.stage), code, mergedHull, vertexHalf, geometryExport)), cfg(GraphBuilder{}.Build(decoded, &swappc)) {
         Structurizer{}.Structurize(cfg);
     }
 
@@ -204,7 +218,7 @@ struct PreparedControlFlow {
     PreparedControlFlow& operator=(const PreparedControlFlow&) = delete;
 
     bool Matches(const RecompileRequest& request, const SwappcInfo& swappcInfo) const {
-        return forcedFlags == ForcedFlagStructurization() && stage == request.shader.stage && mergedHull == MergedHullStage(request) && vertexHalf == CapturesGeometryInput(request) && swappc.fetchCallAllowed == swappcInfo.fetchCallAllowed &&
+        return forcedFlags == ForcedFlagStructurization() && stage == request.shader.stage && mergedHull == MergedHullStage(request) && vertexHalf == CapturesGeometryInput(request) && geometryExport == ExportsToGeometry(request) && swappc.fetchCallAllowed == swappcInfo.fetchCallAllowed &&
                swappc.userDataBaseRegister == swappcInfo.userDataBaseRegister && swappc.userDataCount == swappcInfo.userDataCount && swappc.waveSize == swappcInfo.waveSize &&
                std::ranges::equal(fallbacks, swappcInfo.linkedCallFallbacks) && std::ranges::equal(code, request.shader.code);
     }
@@ -221,6 +235,7 @@ struct PreparedControlFlow {
     SwappcInfo swappc;
     std::vector<std::uint32_t> code;
     bool vertexHalf;
+    bool geometryExport;
     RdnaProgram decoded;
     ControlFlowGraph cfg;
 };

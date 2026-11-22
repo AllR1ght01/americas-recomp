@@ -24,7 +24,9 @@ int main(int argc, char** argv) {
     // User data words = SGPRs s0.. (userDataBaseRegister 0). Mesh (merged NGG) shaders: s0-s7 are system/hidden words and user data runs
     // from s8 up to s39 (32 user SGPRs), so 40 words; compute and the other stages keep 16 (for compute, workgroup ids follow the user data).
     const std::string stageArg = argc > 6 ? argv[6] : "cs";
-    const std::size_t nud = (stageArg == "ms" || stageArg == "gs") ? 40 : 16;
+    const std::uint32_t esgsItem = stageArg == "vs" && argc > 8 ? std::stoul(argv[8]) : 0u;
+    const std::uint32_t udBase = esgsItem != 0u ? 8u : 0u;
+    const std::size_t nud = (stageArg == "ms" || stageArg == "gs") ? 40 : esgsItem != 0u ? 32 : 16;
     std::vector<std::uint32_t> userData(nud);
     struct Node { std::uint32_t id = 0; std::int64_t parent = -1; std::uint32_t off = 0; std::vector<std::uint32_t> mem = std::vector<std::uint32_t>(0x10000); std::uint32_t base = 0; };
     std::map<std::uint32_t, Node> nodes;
@@ -38,7 +40,7 @@ int main(int argc, char** argv) {
                 std::uint32_t id; std::string how; bf >> id >> how;
                 Node& n = nodes[id];
                 n.id = id; n.base = 0x10000000u + 0x100000u * id;
-                if (how == "user") { std::uint32_t k; bf >> k; if (k < nud) userData[k] = n.base; }
+                if (how == "user") { std::uint32_t k; bf >> k; if (k >= udBase && k - udBase < nud) userData[k - udBase] = n.base; }
                 else { std::int64_t p; std::uint32_t off; bf >> p >> off; n.parent = p; n.off = off; }
             } else if (kind == "desc") {
                 std::uint32_t id, off; std::string cls; bf >> id >> off >> cls;
@@ -137,6 +139,16 @@ int main(int argc, char** argv) {
             }
         }
         request.context.vertex = vx;
+        if (esgsItem != 0u) {
+            GraphicsCompileContext g{};
+            g.firstUserSgpr = 0;
+            GeometryConfiguration geom{};
+            geom.esgsItemSize = esgsItem;
+            geom.inputAttributeCount = (esgsItem + 3u) / 4u;
+            geom.gsvsOffsetDwords = std::max<std::uint32_t>(64u, (3u * esgsItem + 63u) & ~63u);
+            g.geometry = geom;
+            request.graphics = g;
+        }
     }
     if (stage != "cs") request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};  // default: fp32 denorm flush, fp16/64 preserve, DX10 clamp
     if (stage == "ms") {
@@ -166,7 +178,7 @@ int main(int argc, char** argv) {
     }
     request.shader = {stage == "ms" ? ShaderStage::Mesh : stage == "gs" ? ShaderStage::Geometry : stage == "ps" ? ShaderStage::Fragment : stage == "vs" ? ShaderStage::Vertex : ShaderStage::Compute, 0x20000u, code, 0, {}};
     request.context.waveSize = wave;
-    request.context.userDataBaseRegister = 0;
+    request.context.userDataBaseRegister = udBase;
     request.context.userData = userData;
     if (stage == "cs") request.context.compute = ShaderComputeStageInfo{{wave, 1u, 1u}, 0u, {true, true, true}, false, 1u};
     request.target.vulkanVersion = 0x00403000u;

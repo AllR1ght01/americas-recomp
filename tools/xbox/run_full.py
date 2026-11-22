@@ -40,6 +40,18 @@ def attrs(idx):
     return (max(a) + 1 if a else 0, sum(1 << x for x in set(f)))
 
 
+def esgs_item(idx):
+    """ESGS item size in dwords of a VS that is the export half of a legacy GS pipeline, else 0. Those end with s_barrier and an
+    s_setpc_b64 into the GS half, and write their item to LDS at lane * item bytes (v_mad_u32_u24 v, lane, <bytes>, s)."""
+    d = open(M + f"bins_full/{idx}.bin", "rb").read()
+    ins, _ = rdna2.sweep(d, 0, len(d))
+    names = [i.name for i in ins if i.name != "s_endpgm"]
+    if names[-2:] != ["s_barrier", "s_setpc_b64"]:
+        return 0
+    sizes = {((i.words[1] >> 9) & 0x1FF) - 128 for i in ins if i.name == "v_mad_u32_u24" and 129 <= ((i.words[1] >> 9) & 0x1FF) <= 192}
+    return sizes.pop() // 4 if len(sizes) == 1 and min(sizes) % 4 == 0 else 0
+
+
 def classify(cmd, spv, env):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=LIMIT, env=env)
@@ -80,8 +92,13 @@ def graphics(idx, st, relaxed):
         if bary:
             e["XBOX_FRAGMENT_BARY"] = "1"
         cmd = [DRIVER_GFX, M + f"bins_full/{idx}.bin", "32", spv, BINDS + f"{idx}.bind", "1", st]
+        item = esgs_item(idx) if st == "vs" else 0
         if st == "vs" and os.path.exists(M + f"vin_full/{idx}.vin"):
             cmd.append(M + f"vin_full/{idx}.vin")
+        elif item:
+            cmd.append("-")
+        if item:
+            cmd.append(str(item))
         if st == "ps":
             n, mask = attrs(idx)
             cmd += ["2", str(n), "%x" % mask]
@@ -116,7 +133,7 @@ def _logic_hash():
     global _LOGIC
     if _LOGIC is None:
         import hashlib, inspect
-        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (attrs, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
+        _LOGIC = hashlib.sha256("".join(inspect.getsource(f) for f in (attrs, esgs_item, classify, compute, graphics, _one)).encode()).hexdigest()[:16]
     return _LOGIC
 
 
