@@ -215,6 +215,60 @@ class MainTest(unittest.TestCase):
                         self.assertTrue(path.is_file())
                         self.assertEqual(path.read_bytes(), b"previous run")
 
+    def test_force_refuses_to_replace_the_input_archive(self):
+        for archive in (self.bins / "1.bin", self.out / "manifest.csv"):
+            with self.subTest(archive=archive.name):
+                self.archive = archive
+                archive.write_bytes(b"\x00")
+                with self.assertRaises(SystemExit) as raised:
+                    self.run_main("--force")
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(archive.read_bytes(), b"\x00")
+                archive.unlink()
+
+    def test_force_preserves_previous_run_if_generating_new_outputs_fails(self):
+        self.archive.write_bytes(b"\x00")
+        vins = self.out / "vin"
+        vins.mkdir()
+        outputs = (self.bins / "1.bin", vins / "1.vin", self.out / "manifest.csv")
+        for path in outputs:
+            path.write_bytes(b"previous run")
+        generated = {"error": None, "name": "first", "kind": 1, "code": b"new", "vin": "vin\n", "prologue": False}
+        with (
+            mock.patch.object(carve_shaders, "find_entries", return_value=[("first", 0), ("second", 0)]),
+            mock.patch.object(carve_shaders, "carve_one", side_effect=[generated, OSError("read failed")]),
+            self.assertRaisesRegex(OSError, "read failed"),
+        ):
+            self.run_main("--force")
+        for path in outputs:
+            self.assertEqual(path.read_bytes(), b"previous run")
+        self.assertEqual(set(self.out.rglob("*")), {self.bins, vins, *outputs})
+
+    def test_force_publishes_generated_blobs_vertex_inputs_and_manifest(self):
+        code = struct.pack("<I", carve_shaders.END_PGM)
+        blob = bytearray(0x1D0)
+        blob[:4] = b"FSSM"
+        struct.pack_into("<QQ", blob, 0xC0, len(blob), len(code))
+        blob[0x138:0x13D] = bytes((6, 2, 3, 4, 1))
+        blob.extend(code)
+        payload = build_dxbc([(b"DXIL", b"\x00\x00\x01\x00" + build_xbch(zlib.compress(blob), len(blob)))])
+        compressor = zlib.compressobj(wbits=-15)
+        compressed = compressor.compress(payload) + compressor.flush()
+        self.archive.write_bytes(b"\x00VS_Test" + carve_shaders.SUFFIX + bytes(17) + compressed)
+        (self.bins / "1.bin").write_bytes(b"old")
+        (self.bins / "2.bin").write_bytes(b"stale")
+        vins = self.out / "vin"
+        vins.mkdir()
+        (vins / "1.vin").write_text("old")
+
+        self.run_main("--force")
+
+        self.assertEqual((self.bins / "1.bin").read_bytes(), code)
+        self.assertFalse((self.bins / "2.bin").exists())
+        self.assertEqual((vins / "1.vin").read_text(), "vin 4 2 2\n")
+        manifest = (self.out / "manifest.csv").read_text().splitlines()
+        self.assertEqual(manifest, [",".join(carve_shaders.FIELDS), "1,VS_Test,1,VS,4,0,"])
+
     def test_force_removes_only_numbered_blobs(self):
         self.archive.write_bytes(b"\x00")
         managed = ("1.bin", "10.bin")
