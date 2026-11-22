@@ -104,3 +104,12 @@ jobs:
           python tools/tests/test_xbox_rdna2_recomp.py
           python tools/tests/test_xbox_xgr_idl_table.py
           python tools/tests/test_xbox_progress_svg.py
+      - name: Check out the Xodus xgameruntime IDLs (LGPL; read at build time, not committed)
+        uses: actions/checkout@v7
+        with:
+          repository: xodus-gaming/xgameruntime
+          ref: 642e41c7617310c5d1b39d4e525b01ecae261f9e
+          path: xodus-xgameruntime
+          persist-credentials: false
+      - name: xgameruntime stand-in tests (MSVC)
+        run: python tools/xbox/platform/xgr/run_tests.py xodus-xgameruntime/include --out build-xgr
