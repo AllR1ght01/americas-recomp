@@ -538,7 +538,7 @@ int main(int argc, char** argv) {
         const bool computeSizes = (dev.subgroup.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
         const auto fits = [&](std::uint32_t size) { return computeSizes ? size >= dev.subgroup.minSubgroupSize && size <= dev.subgroup.maxSubgroupSize : size == dev.nativeSubgroupSize; };
         const std::uint32_t fallbackSubgroup = computeSizes && dev.subgroup.maxSubgroupSize > 0u && dev.subgroup.maxSubgroupSize <= wave ? dev.subgroup.maxSubgroupSize : dev.nativeSubgroupSize > 0u && dev.nativeSubgroupSize <= wave ? dev.nativeSubgroupSize : wave;
-        std::uint32_t hostSubgroup = graphics ? dev.nativeSubgroupSize : fits(wave) ? wave : wave == 64u && fits(32u) ? 32u : fallbackSubgroup;
+        std::uint32_t hostSubgroup = graphics ? dev.nativeSubgroupSize : fits(wave) ? wave : wave == 64u && fits(32u) ? 32u : wave == 32u && fits(64u) ? 64u : fallbackSubgroup;
         if (const char* forced = std::getenv("XBOX_HOST_SUBGROUP")) {
             const auto size = Num(forced);
             if (pixel && size != dev.nativeSubgroupSize &&
