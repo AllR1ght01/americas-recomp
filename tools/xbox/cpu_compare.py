@@ -10,7 +10,7 @@ Runs in worker PROCESSES (the interpreter is pure Python, so threads would share
 100,000 wave steps; the largest compared shader needs about 10,000) and --gpu-timeout the GPU run (default 30 s); shaders that hit
 either are SKIP / GPU_FAIL. Each record has "secs", the wall time it took.
 """
-import concurrent.futures as cf, json, os, struct, subprocess, sys, tempfile
+import concurrent.futures as cf, json, os, shutil, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_real as R
 import cpu_ref as C
@@ -37,10 +37,15 @@ def scenario_memory(lines):
         w = l.split()
         if w[0] == "image":
             iid, wd, ht = int(w[1]), int(w[2]), int(w[3])
+            dim_s = w[w.index("dim") + 1] if "dim" in w else "2d"
+            depth = int(w[w.index("depth") + 1]) if "depth" in w else 1
             layers = int(w[w.index("layers") + 1]) if "layers" in w else 1
-            n = wd * ht * 4 * layers
+            if dim_s == "2d" and layers > 1:
+                dim_s = "2da"
+            slices = depth if dim_s == "3d" else layers
+            n = wd * ht * 4 * slices
             data = list(struct.unpack('<%dI' % n, open(w[w.index("init") + 1], "rb").read())) if "init" in w else [0] * n
-            images[iid] = {"w": wd, "h": ht, "layers": layers, "data": data, "written": {}}
+            images[iid] = {"w": wd, "h": ht, "depth": depth, "layers": layers, "dim": dim_s, "data": data, "written": {}}
     def put(rid, off, v):
         struct.pack_into('<I', regions[rid], off, v & 0xffffffff)
     for l in lines:
@@ -59,7 +64,9 @@ def scenario_memory(lines):
             im = images[int(w[3])]
             fake = 0x7000000000 + 0x1000000 * int(w[3])
             o = int(w[2], 0)
-            for k, v in enumerate([fake >> 8, ((fake >> 40) & 0xff) | (77 << 20) | (3 << 30), (im["w"] - 1) | ((im["h"] - 1) << 14), 0xfac | ((13 if im["layers"] > 1 else 9) << 28), im["layers"] - 1 if im["layers"] > 1 else 0, 0, 0, 0]):
+            tcode = {"1d": 8, "2d": 9, "3d": 10, "cube": 11, "2da": 13}[im["dim"]]
+            dword4 = (im["depth"] - 1) if im["dim"] == "3d" else ((im["layers"] - 1) if im["layers"] > 1 else 0)
+            for k, v in enumerate([fake >> 8, ((fake >> 40) & 0xff) | (77 << 20) | (3 << 30), (im["w"] - 1) | ((im["h"] - 1) << 14), 0xfac | (tcode << 28), dword4, 0, 0, 0]):
                 put(int(w[1]), o + 4 * k, v)
         elif w[0] in ("user", "ptr8lo", "ptr8hi"):
             raise C.Unsupported("scenario keyword " + w[0])
@@ -80,11 +87,18 @@ def close(a, b):
 def one_profile(idx, profile):
     d = tempfile.mkdtemp(prefix=f"cmp{idx}_")
     try:
+        return _one_profile_in(idx, profile, d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _one_profile_in(idx, profile, d):
+    try:
         lines, info = R.build(idx, WAVE, d, WAVE, profile)
     except R.Unsupported as e:
         return {"idx": idx, "outcome": "SKIP", "detail": str(e)}
     lines = [("groups 1 1 1" if l.startswith("groups") else l) for l in lines]
-    code = open(R.ROOT + f"bins_all/{idx}.bin", "rb").read()
+    code = open(os.path.join(R.BINS_DIR, f"{idx}.bin"), "rb").read()
     # CPU side first: cheap, and decides whether the shader is interpretable at all
     try:
         regions, sgpr, images = scenario_memory(lines)
@@ -149,10 +163,8 @@ def one(idx):
 
 def _one(idx):
     """run each input profile; a shader MISMATCHes if any profile does, MATCHes if at least one profile ran and none differ"""
-    code = open(R.ROOT + f"bins_all/{idx}.bin", "rb").read()
+    code = open(os.path.join(R.BINS_DIR, f"{idx}.bin"), "rb").read()
     ins, _ = C.rdna2.sweep(code, 0, len(code))
-    # small integers are denormals when a float instruction reads them, and the GPU may flush denormals while the reference does not:
-    # so the integer profile is only used for shaders without float arithmetic
     has_float = any(("_f32" in i.name or "_f16" in i.name) for i in ins)
     recs = [one_profile(idx, p) for p in (("float",) if has_float else PROFILES)]
     bad = [r for r in recs if r["outcome"] == "MISMATCH"]
@@ -172,11 +184,11 @@ def main():
     opt = lambda name, default: argv[argv.index(name) + 1] if name in argv else default
     import csv
     max_insns = int(opt("--max-bytes", 800))
-    rows = [r for r in csv.DictReader(open(R.ROOT + "manifest_all.csv")) if r["stage"] == "CS" and int(r["bytes"]) <= max_insns]
+    rows = [r for r in csv.DictReader(open(R.MANIFEST)) if r["stage"] == "CS" and int(r.get("bytes") or os.path.getsize(os.path.join(R.BINS_DIR, f"{r['idx']}.bin"))) <= max_insns]
     ids = opt("--ids", "").split(",") if "--ids" in argv else [r["idx"] for r in rows]
-    ids = [i for i in ids if os.path.exists(R.ROOT + f"binds_all/{i}.bind")]
+    ids = [i for i in ids if os.path.exists(os.path.join(R.BINDS_DIR, f"{i}.bind"))]
     import harness_guard
-    harness_guard.require_fresh_binds(R.ROOT + "binds_all", ids)     # refuse bindings made by another bindings.py
+    harness_guard.require_fresh_binds(R.BINDS_DIR, ids)
     if "--no-canary" not in argv:
         import canary
         if not canary.compare_ok():                                   # known MATCHes must still match before the run
