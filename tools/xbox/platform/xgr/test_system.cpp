@@ -481,6 +481,12 @@ static void CheckGameUi() {
     Check(ui.At<HRESULT (*)(void*, AsyncBlock*, const char*, const char*, const char*, const char*, const char*, uint32_t, uint32_t)>(3, "XGameUiShowMessageDialogAsync")(
               ui.self, &bad, nullptr, "Content", nullptr, nullptr, nullptr, 0, 0) == E_INVALIDARG,
           "XGameUiShowMessageDialogAsync rejects a null title");
+    Check(ui.At<HRESULT (*)(void*, AsyncBlock*, const char*, const char*, const char*, const char*, const char*, uint32_t, uint32_t)>(3, "XGameUiShowMessageDialogAsync")(
+              ui.self, &bad, "Title", "Content", nullptr, nullptr, nullptr, 3, 0) == E_INVALIDARG,
+          "XGameUiShowMessageDialogAsync rejects an out-of-range defaultButton");
+    Check(ui.At<HRESULT (*)(void*, AsyncBlock*, const char*, const char*, const char*, const char*, const char*, uint32_t, uint32_t)>(3, "XGameUiShowMessageDialogAsync")(
+              ui.self, &bad, "Title", "Content", nullptr, nullptr, nullptr, 0, 3) == E_INVALIDARG,
+          "XGameUiShowMessageDialogAsync rejects an out-of-range cancelButton");
   }
   {
     AsyncBlock b{};
