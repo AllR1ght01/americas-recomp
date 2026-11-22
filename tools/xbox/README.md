@@ -108,13 +108,35 @@ With a built execution harness and the Vulkan SDK's `glslangValidator` on PATH:
 python tools/xbox/per_vertex_test.py --exec "build-xbox/exec.exe"
 ```
 
-The fragment program reads the P0, P10 and P20 interpolation parameters of one
-attribute with `VINTRP MOV` and writes them to three RGBA32F targets. The vertex
-shader assigns red, green and blue to the three vertices. P10 and P20 are the
-vertex-1 and vertex-2 plane coefficients (P1 - P0 and P2 - P0), not the raw
-vertex colours. Every pixel must read P0 = (1, 0, 0, 1), P10 = (-1, 1, 0, 0) and
-P20 = (-1, 0, 1, 0). The test needs `VK_KHR_fragment_shader_barycentric`; without
-a geometry shader the host path is not a valid reference for per-vertex inputs.
+The fragment program reads the P0, P10 and P20 interpolation parameters of two
+attributes with `VINTRP MOV` and writes them to six RGBA32F targets. P10 and P20
+are the plane coefficients P1 - P0 and P2 - P0. Every pixel must read the
+following values. This test requires native per-vertex inputs through
+`VK_KHR_fragment_shader_barycentric`.
+
+| Attribute | P0 | P10 | P20 |
+| --- | --- | --- | --- |
+| 0 | (1, 0, 0, 1) | (-1, 1, 0, 0) | (-1, 0, 1, 0) |
+| 1 | (0.25, 0.5, 0.75, 1) | (0.25, 0.25, 0.25, 0.25) | (0.75, 1, 1.25, 1.5) |
+
+With `XBOX_NO_FRAGMENT_BARY=1`, the EXEC-7 guard rejects fragment shaders whose
+compiled artifacts require a barycentric emulation companion stage that the execution
+harness does not provide. Previously these shaders could reach the pipeline with unmatched
+fragment inputs and produce undefined results. For `cpu_compare_ps.py` runs that reach the
+guard with a rebuilt pixel harness, the script records `GPU_FAIL` with the
+missing-companion-stage diagnostic. These cases produce no readback to compare.
+CPU-side `SKIP` handling is unchanged.
+
+The guard tests check both rejection and successful fragment compilation:
+
+```sh
+python3 -I tools/xbox/pipeline_capability_test.py --exec build-xbox/exec
+```
+
+The native compilation check is skipped if the selected device lacks
+`VK_KHR_fragment_shader_barycentric` support. On a device with
+`geometryShader=false`, add `--expect-no-geometry` to check early rejection of
+`stage gs`.
 
 ## Quad swizzle test
 

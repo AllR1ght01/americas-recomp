@@ -123,7 +123,7 @@ void MakeBuffer(Device& d, Region& r, std::uint64_t size, VkBufferUsageFlags usa
     r.address = d.getAddress(d.device, &info);
 }
 
-Device CreateDevice(std::uint32_t wave, bool bary) {
+Device CreateDevice(bool bary, bool geometry) {
     Device d;
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.apiVersion = VK_API_VERSION_1_3;
@@ -181,6 +181,8 @@ Device CreateDevice(std::uint32_t wave, bool bary) {
     }
     if (bary) f13.pNext = &fbary;
     vkGetPhysicalDeviceFeatures2(d.physical, &f2);
+    if (geometry && !f2.features.geometryShader)
+        throw std::runtime_error("stage gs requires the Vulkan geometryShader feature");
     d.subgroupSizeControl = f13.subgroupSizeControl == VK_TRUE;
     if (bary && !fbary.fragmentShaderBarycentric) throw std::runtime_error(noBary);
     d.samplerAnisotropy = f2.features.samplerAnisotropy == VK_TRUE;
@@ -208,7 +210,6 @@ Device CreateDevice(std::uint32_t wave, bool bary) {
     VK(vkCreateDevice(d.physical, &dci, nullptr, &d.device));
     vkGetDeviceQueue(d.device, d.family, 0, &d.queue);
     d.getAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(vkGetDeviceProcAddr(d.device, "vkGetBufferDeviceAddress"));
-    (void)wave;
     return d;
 }
 
@@ -357,7 +358,8 @@ int main(int argc, char** argv) {
         }
         const bool graphics = pixel || geometry;
         if (geometry && userCount == 16) userCount = 40;
-        Device dev = CreateDevice(wave, pixel && !std::getenv("XBOX_NO_FRAGMENT_BARY"));
+        const bool bary = pixel && !std::getenv("XBOX_NO_FRAGMENT_BARY");
+        Device dev = CreateDevice(bary, geometry);
         std::map<std::uint32_t, Region> regions;
         for (auto& l : lines) {
             if (l.w[0] != "region") continue;
@@ -557,7 +559,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> capsLocal = caps;
         std::vector<std::string_view> extLocal(ext.begin(), ext.end());
         if (dev.shaderResourceMinLod) capsLocal.push_back(42u);
-        if (pixel && !std::getenv("XBOX_NO_FRAGMENT_BARY")) {
+        if (bary) {
             // the host has VK_KHR_fragment_shader_barycentric (per-vertex inputs and barycentric builtins need no geometry-shader emulation)
             request.target.fragmentShaderBarycentricEnabled = true;
             request.target.fragmentBarycentricBuiltins = true;
@@ -573,9 +575,12 @@ int main(int argc, char** argv) {
         request.useCache = false;
         const auto result = Recompile(request);
         if (result.spirv.empty()) throw std::runtime_error("recompile produced no module");
+        if (result.barycentricEmulation.active)
+            throw std::runtime_error("fragment shader requires a barycentric emulation companion stage that exec does not provide");
         std::printf("compiled: %zu words, %zu bindings, push %zu bytes, bdaAbi %u\n", result.spirv.Words().size(), result.bindings.size(), result.pushConstants.size(), result.bdaAbiVersion);
 
-        const VkShaderStageFlags stageBits = graphics ? (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT) : VK_SHADER_STAGE_COMPUTE_BIT;
+        VkShaderStageFlags stageBits = graphics ? (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT) : VK_SHADER_STAGE_COMPUTE_BIT;
+        if (geometry) stageBits |= VK_SHADER_STAGE_GEOMETRY_BIT;
         // Descriptor layout + resources for each binding.
         std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
         std::vector<std::vector<VkDescriptorBufferInfo>> infos(result.bindings.size());
