@@ -13,6 +13,11 @@ and the denormal-source flush stay those of the gfx1010 v_mad_legacy_f32. One 32
 Rows 0 and 1 are the #1281 discriminator rows and rows 3 and 5 its denormal-flush rows (v_fma_f32 keeps the tiny there). Row 2 is
 the zero rule as docs/dev/debt/shader.md describes it for gfx1010. The recompiler is run twice: by default (fused) and with
 XBOX_NO_FUSED_LEGACY_MAD=1 (product rounded first, the gfx1010 behaviour). Both must match their column.
+
+The operands are loaded from the output buffer (bytes 32..63 of each lane's record, written by this test) rather than moved in as
+literals: with literals the recompiler folds them into an Fma whose three operands are constants, and Intel's Windows driver
+(101.6127, see the GPU matrix) folds that as a rounded multiply followed by an add, so the test then measures the driver's constant
+folder instead of the GPU. With run-time operands the same driver fuses.
 """
 import argparse
 import os
@@ -23,7 +28,8 @@ import tempfile
 
 
 LANES = 32
-STRIDE = 32
+STRIDE = 64
+INPUTS = 32
 ONE, NEG_ONE, TWO = 242, 243, 244
 ZERO = 128
 V = 256
@@ -31,8 +37,8 @@ FUSED = (0x3A000400, 0x7F7FFFFF, 0x3F800000, 0x00000000, 0x3A000400, 0x00000000)
 ROUNDED = (0x3A000000, 0x7F800000, 0x3F800000, 0x00000000, 0x3A000000, 0x00000000)
 
 
-def v_mov_literal(destination, value):
-    return [0x7E000000 | (destination << 17) | (0x01 << 9) | 255, value]
+def buffer_load_dword(data, offset):
+    return [0xE0301000 | offset, 0x80020004 | (data << 8)]
 
 
 def v_mad_legacy(destination, first, second, third):
@@ -47,16 +53,15 @@ def buffer_store_dword(data, offset):
     return [0xE0701000 | offset, 0x80020004 | (data << 8)]
 
 
+INPUT_VALUES = {10: 0x3F800800, 11: 0x7F7FFFFF, 13: 0xFF7FFFFF, 14: 0x7F800000, 15: 0x00000001, 16: 0xBF800000,
+                17: 0x80000000, 18: 0x80000001}
+
+
 def program():
-    words = [0xF4080202, 0xFA000000, 0xBF8C0000, 0x34080085]
-    words += v_mov_literal(10, 0x3F800800)
-    words += v_mov_literal(11, 0x7F7FFFFF)
-    words += v_mov_literal(13, 0xFF7FFFFF)
-    words += v_mov_literal(14, 0x7F800000)
-    words += v_mov_literal(15, 0x00000001)
-    words += v_mov_literal(16, 0xBF800000)
-    words += v_mov_literal(17, 0x80000000)
-    words += v_mov_literal(18, 0x80000001)
+    words = [0xF4080202, 0xFA000000, 0xBF8C0000, 0x34080086]
+    for slot, register in enumerate(INPUT_VALUES):
+        words += buffer_load_dword(register, INPUTS + 4 * slot)
+    words.append(0xBF8C0000)
     words += v_mad_legacy(20, V + 10, V + 10, NEG_ONE)
     words += v_mad_legacy(21, V + 11, TWO, V + 13)
     words += v_mad_legacy(22, ZERO, V + 14, ONE)
@@ -69,13 +74,19 @@ def program():
     return struct.pack(f"<{len(words)}I", *words)
 
 
+def initial_region():
+    record = bytes(INPUTS) + struct.pack(f"<{len(INPUT_VALUES)}I", *INPUT_VALUES.values())
+    return (record + bytes(STRIDE - len(record))) * LANES
+
+
 def run(runner, env):
     with tempfile.TemporaryDirectory(prefix="mad legacy fused ") as temp:
         work = Path(temp)
         (work / "code.bin").write_bytes(program())
+        (work / "region1.bin").write_bytes(initial_region())
         (work / "scenario.txt").write_text(
             "wave 32\ngroups 1 1 1\ncode code.bin\nout out\n"
-            f"region 0 256\nregion 1 {LANES * STRIDE}\nptrlo 0 0 1\nptrhi 0 4 1 0\n"
+            f"region 0 256\nregion 1 {LANES * STRIDE} init region1.bin\nptrlo 0 0 1\nptrhi 0 4 1 0\n"
             f"poke 0 8 {LANES * STRIDE}\npoke 0 12 0x30027fac\nuser 4 0\n", encoding="ascii")
         subprocess.run([runner, "scenario.txt"], cwd=work, env=env, check=True, timeout=90, stdout=subprocess.DEVNULL)
         return (work / "out" / "region1.bin").read_bytes()
