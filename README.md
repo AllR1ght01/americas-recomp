@@ -12,10 +12,10 @@ Can an Xbox Series game run on a PC through [AnyPS5](https://github.com/boykopov
 
 | Stage | Shaders | Valid SPIR-V | Notes |
 |---|---|---|---|
-| Compute | 2,689 | **2,650 (98.6%)** | best of four fake-memory variants (default, unbacked, tiled T#, tiled V#); 0 invalid |
-| Pixel | 12,098 | **7,046 (58.2%, strict)** | 7,295 with `VK_KHR_fragment_shader_barycentric`; 12,063 (99.7%) with that and the f16 approximation |
-| Vertex | 2,233 | 1,402 (62.8%) | the rest need the real vertex fetch shader |
-| Mesh | 9,282 | 9,145 (98.5%) | mesh configuration is a guess |
+| Compute | 2,689 | **2,679 (99.6%)** | best of four fake-memory variants (default, unbacked, tiled T#, tiled V#); 0 invalid; 6 time out, 4 throw |
+| Pixel | 12,098 | **12,095 (99.97%, strict)** | no barycentric extension and no f16 opt-in needed any more (#104, #101, and the descriptor-chain work in #86, #87, #91, #94, #102); 3 throw |
+| Vertex | 2,233 | 1,445 (64.7%) | the rest need the real vertex fetch shader |
+| Mesh | 9,282 | 9,240 (99.5%) | mesh configuration is a guess |
 | Geometry | 195 | 195 (100%) | `spirv-val` only for the corpus; `gs_test.py` executes two synthetic geometry shaders |
 
 The corpus is the 26,503 shaders of `shaders.rpf` (26,497 went through the recompiler; 6 do not inflate). The strict pixel number is the headline: the f16 approximation is opt-in and off by default.
