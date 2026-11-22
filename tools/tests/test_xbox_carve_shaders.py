@@ -157,6 +157,23 @@ class MainTest(unittest.TestCase):
         self.assertTrue(kept.exists())
         self.assertFalse((self.out / "manifest.csv").exists())
 
+    def test_force_preserves_outputs_when_archive_cannot_be_mapped(self):
+        vins = self.out / "vin"
+        vins.mkdir()
+        outputs = (self.bins / "1.bin", vins / "1.vin", self.out / "manifest.csv")
+        for archive_exists, error in ((False, FileNotFoundError), (True, ValueError)):
+            with self.subTest(archive_exists=archive_exists):
+                for path in outputs:
+                    path.write_bytes(b"previous run")
+                if archive_exists:
+                    self.archive.touch()
+                with self.assertRaises(error):
+                    self.run_main("--force")
+                for path in outputs:
+                    with self.subTest(path=path.name):
+                        self.assertTrue(path.is_file())
+                        self.assertEqual(path.read_bytes(), b"previous run")
+
     def test_force_removes_only_numbered_blobs(self):
         self.archive.write_bytes(b"\x00")
         managed = ("1.bin", "10.bin")
