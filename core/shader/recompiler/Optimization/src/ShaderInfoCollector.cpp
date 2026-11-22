@@ -540,7 +540,7 @@ void CollectOutputs(const IrProgram& program, ShaderStageInputInfo inputInfo, Sh
 
 std::uint16_t SamplerUseOf(IrOpcode opcode, std::uint32_t flags, IrShaderStage stage) {
     if (opcode == IrOpcode::ImageGatherRaw) {
-        return static_cast<std::uint16_t>((flags & RdnaImageSampleFlagLod) != 0u ? SamplerUseGather | SamplerUseGatherLod : SamplerUseGather);
+        return static_cast<std::uint16_t>((flags & (RdnaImageSampleFlagLod | RdnaImageSampleFlagLodClamp)) != 0u ? SamplerUseGather | SamplerUseGatherLod : SamplerUseGather);
     }
     if (opcode == IrOpcode::ImageQueryLod) {
         return SamplerUseQueryLod;
