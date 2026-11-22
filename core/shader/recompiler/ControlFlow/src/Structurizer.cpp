@@ -2524,6 +2524,65 @@ void Structurizer::structurize(ControlFlowGraph& graph, bool privatizeReturns, b
     const auto startBlocks = graph.blocks.size();
     recomputeAnalyses(graph);
     verifyReducibility(graph);
+    const auto exitlessBudget = graph.blocks.size() + 1u;
+    for (std::size_t step = 0; step < exitlessBudget; ++step) {
+        const NaturalLoop* exitless = nullptr;
+        for (const auto& loop : graph.naturalLoops) {
+            if (loop.exitBlocks.empty() && (exitless == nullptr || loop.blocks.size() < exitless->blocks.size())) {
+                exitless = &loop;
+            }
+        }
+        if (exitless == nullptr) {
+            break;
+        }
+        std::vector<std::uint32_t> latches;
+        for (const auto& edge : graph.backEdges) {
+            if (edge.targetBlock == exitless->headerBlock) {
+                addUnique(latches, edge.sourceBlock);
+            }
+        }
+        if (latches.empty()) {
+            throw std::runtime_error("loop at block " + std::to_string(exitless->headerBlock) + " has no structured merge/continue");
+        }
+        const auto headerId = exitless->headerBlock;
+        const auto headerPc = graph.FindBlock(headerId).startProgramCounter;
+        const auto headerInst = graph.FindBlock(headerId).instructionBegin;
+
+        BasicBlock exitBlock;
+        exitBlock.id = static_cast<std::uint32_t>(graph.blocks.size());
+        exitBlock.startProgramCounter = headerPc;
+        exitBlock.endProgramCounter = headerPc;
+        exitBlock.instructionBegin = headerInst;
+        exitBlock.instructionEnd = headerInst;
+        exitBlock.terminator.kind = TerminatorKind::Return;
+        const auto exitId = exitBlock.id;
+        graph.blocks.push_back(std::move(exitBlock));
+
+        BasicBlock continueBlock;
+        continueBlock.id = static_cast<std::uint32_t>(graph.blocks.size());
+        continueBlock.startProgramCounter = headerPc;
+        continueBlock.endProgramCounter = headerPc;
+        continueBlock.instructionBegin = headerInst;
+        continueBlock.instructionEnd = headerInst;
+        continueBlock.successors = {headerId, exitId};
+        sortUnique(continueBlock.successors);
+        continueBlock.terminator.kind = TerminatorKind::ConditionalBranch;
+        continueBlock.terminator.condition = BranchCondition::Always;
+        continueBlock.terminator.trueBlock = headerId;
+        continueBlock.terminator.falseBlock = exitId;
+        const auto continueId = continueBlock.id;
+        graph.blocks.push_back(std::move(continueBlock));
+
+        for (const auto latch : latches) {
+            auto& block = graph.FindBlock(latch);
+            replaceValue(block.successors, headerId, continueId);
+            sortUnique(block.successors);
+            replaceTerminatorTarget(block.terminator, headerId, continueId);
+        }
+        rebuildPredecessors(graph);
+        recomputeAnalyses(graph);
+        verifyReducibility(graph);
+    }
     for (const auto& loop : graph.naturalLoops) {
         if (loop.exitBlocks.empty()) {
             throw std::runtime_error("loop at block " + std::to_string(loop.headerBlock) + " has no structured merge/continue");
@@ -2920,7 +2979,15 @@ void Structurizer::canonicalizeNaturalLoops(ControlFlowGraph& graph, bool routeL
             const auto& header = graph.FindBlock(loop.headerBlock);
             const bool semanticSelfLoop = latches.size() == 1u && latches.front() == header.id && header.instructionBegin != header.instructionEnd;
             const bool semanticLatch = latches.size() == 1u && graph.FindBlock(latches.front()).instructionBegin != graph.FindBlock(latches.front()).instructionEnd && graph.FindBlock(latches.front()).predecessors.size() == 1u;
-            if (latches.size() <= 1u && !latchInInnerLoop && !semanticSelfLoop && !semanticLatch) {
+            const bool nonMergeLatchBranch = latches.size() == 1u && [&] {
+                const auto& latch = graph.FindBlock(latches.front());
+                if (latch.terminator.kind != TerminatorKind::ConditionalBranch) {
+                    return false;
+                }
+                const auto other = latch.terminator.trueBlock == loop.headerBlock ? latch.terminator.falseBlock : latch.terminator.trueBlock;
+                return other != loop.mergeBlock && other != loop.headerBlock;
+            }();
+            if (latches.size() <= 1u && !latchInInnerLoop && !semanticSelfLoop && !semanticLatch && !nonMergeLatchBranch) {
                 continue;
             }
 
