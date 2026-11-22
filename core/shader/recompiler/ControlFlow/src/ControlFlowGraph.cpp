@@ -256,6 +256,26 @@ std::string GraphToString(const ControlFlowGraph& graph) {
         text += "unsupportedReason=" + graph.unsupportedReason + "\n";
     }
 
+    const auto formatTreeSet = [&](const std::vector<std::uint32_t>& cached, const ControlFlowGraph::TreeIndex& tree, std::uint32_t id) {
+        if (!cached.empty() || !tree.valid || graph.blocks.size() != tree.tin.size() || id >= tree.tin.size()) {
+            return joinIds(cached);
+        }
+        std::vector<std::uint32_t> ids;
+        if (tree.tin[id] == InvalidControlFlowId) {
+            ids.resize(graph.blocks.size());
+            for (std::uint32_t i = 0; i < graph.blocks.size(); ++i) ids[i] = i;
+            return joinIds(ids);
+        }
+        std::uint32_t cursor = id;
+        for (;;) {
+            ids.push_back(cursor);
+            if (tree.parent[cursor] == cursor || tree.parent[cursor] == InvalidControlFlowId) break;
+            cursor = tree.parent[cursor];
+        }
+        sortUnique(ids);
+        return joinIds(ids);
+    };
+
     for (const auto& block : graph.blocks) {
         text += "block_" + std::to_string(block.id);
         text += " pc=" + toHexString(block.startProgramCounter);
@@ -264,8 +284,8 @@ std::string GraphToString(const ControlFlowGraph& graph) {
         text += " words=" + std::to_string(block.estimatedSpirvWords) + "\n";
         text += "  predecessors=[" + joinIds(block.predecessors) + "]";
         text += " successors=[" + joinIds(block.successors) + "]\n";
-        text += "  dominators=[" + joinIds(block.dominators) + "]";
-        text += " postDominators=[" + joinIds(block.postDominators) + "]\n";
+        text += "  dominators=[" + formatTreeSet(block.dominators, graph.domTree, block.id) + "]";
+        text += " postDominators=[" + formatTreeSet(block.postDominators, graph.pdomTree, block.id) + "]\n";
         text += "  terminator=" + std::to_string(static_cast<std::uint32_t>(block.terminator.kind));
         text += " condition=" + BranchConditionToString(block.terminator.condition);
         text += " true=" + std::to_string(block.terminator.trueBlock);

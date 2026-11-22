@@ -219,6 +219,15 @@ bool assignTreeDominators(std::vector<BasicBlock>& blocks, const std::vector<std
 void materializeTreeSets(std::vector<BasicBlock>& blocks, const ControlFlowGraph::TreeIndex& tree, std::vector<std::uint32_t> BasicBlock::*sets) {
     if (!tree.valid || blocks.size() != tree.tin.size()) return;
     const auto count = static_cast<std::uint32_t>(blocks.size());
+    constexpr std::uint64_t maxEntries = 4ull * 1024ull * 1024ull;
+    std::uint64_t totalEntries = 0u;
+    for (std::uint32_t id = 0; id < count; ++id) {
+        totalEntries += tree.tin[id] == InvalidControlFlowId ? count : tree.depth[id];
+        if (totalEntries > maxEntries) {
+            for (auto& block : blocks) (block.*sets).clear();
+            return;
+        }
+    }
     std::vector<std::uint32_t> order;
     order.reserve(count);
     for (std::uint32_t id = 0; id < count; ++id) {
