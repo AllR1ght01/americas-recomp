@@ -2155,18 +2155,53 @@ private:
     }
 
     struct DescriptorWeb {
-        static constexpr std::size_t maxStates = 512u;
+        static constexpr std::size_t maxStates = 8192u;
+        static constexpr std::size_t maxDepth = 512u;
         static constexpr std::size_t maxArms = 64u;
         static constexpr std::uint32_t foldedArm = 0xffffffffu;
         std::string failure;
         bool foldedValue = false;
+        std::size_t depth = 0;
         std::vector<std::vector<IrValue*>> arms;
         std::map<std::pair<std::vector<IrValue*>, const IrValue*>, IrValue*> selectors;
         std::vector<std::pair<IrBlock*, IrValue*>> phis;
         std::vector<std::tuple<IrBlock*, IrValue*, IrValue*>> lanes;
         std::unordered_map<IrValue*, IrValue*> resolved;
+        std::unordered_map<IrValue*, IrValue*> canonical;
+        std::unordered_map<std::uint32_t, std::vector<IrValue*>> representatives;
         std::unordered_map<const IrBlock*, std::size_t> order;
     };
+
+    struct WebDepth {
+        explicit WebDepth(DescriptorWeb& web) : web(web) {
+            ++web.depth;
+        }
+        ~WebDepth() {
+            --web.depth;
+        }
+        WebDepth(const WebDepth&) = delete;
+        WebDepth& operator=(const WebDepth&) = delete;
+        DescriptorWeb& web;
+    };
+
+    IrValue* CanonicalLeaf(IrValue* value, DescriptorWeb& web) const {
+        if (value->IsPhi() || value->Opcode() == IrOpcode::SelectU32 || value->Opcode() == IrOpcode::ReadFirstLane) {
+            return value;
+        }
+        const auto [entry, inserted] = web.canonical.try_emplace(value, value);
+        if (!inserted) {
+            return entry->second;
+        }
+        auto& bucket = web.representatives[static_cast<std::uint32_t>(value->Opcode())];
+        for (IrValue* representative : bucket) {
+            if (EquivalentValue(m_program.Resources(), representative, value)) {
+                entry->second = representative;
+                return representative;
+            }
+        }
+        bucket.push_back(value);
+        return value;
+    }
 
     static bool StrictDescriptorWebs() {
         static const bool strict = [] {
@@ -2251,9 +2286,16 @@ private:
             }
             value = SimplifyUnderActiveMask(entry->second, activeMask);
         }
+        for (IrValue*& value : tuple) {
+            value = CanonicalLeaf(value, web);
+        }
         const auto key = std::make_pair(tuple, activeMask);
         if (const auto known = web.selectors.find(key); known != web.selectors.end()) {
             return known->second;
+        }
+        const WebDepth nested(web);
+        if (web.depth > DescriptorWeb::maxDepth) {
+            return GiveUp(web, "nested more than " + std::to_string(DescriptorWeb::maxDepth) + " joins deep");
         }
         if (!StrictDescriptorWebs()) {
             for (IrValue* value : tuple) {
@@ -2336,7 +2378,7 @@ private:
             return &m_builder.Constant(static_cast<std::uint32_t>(web.arms.size() - 1u));
         }
         if (web.selectors.size() == DescriptorWeb::maxStates) {
-            return GiveUp(web, "more than 512 descriptor states");
+            return GiveUp(web, "more than " + std::to_string(DescriptorWeb::maxStates) + " descriptor states");
         }
         const auto& predecessors = block->Predecessors();
         if (predecessors.size() < 2u) {
@@ -2376,7 +2418,7 @@ private:
             return GiveUp(web, "a per-lane descriptor selection has an unexpected form");
         }
         if (web.selectors.size() == DescriptorWeb::maxStates) {
-            return GiveUp(web, "more than 512 descriptor states");
+            return GiveUp(web, "more than " + std::to_string(DescriptorWeb::maxStates) + " descriptor states");
         }
         const auto blockOrderIt = web.order.find(block);
         const std::size_t blockOrder = blockOrderIt == web.order.end() ? 0u : blockOrderIt->second;
