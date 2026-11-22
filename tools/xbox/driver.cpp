@@ -138,7 +138,13 @@ int main(int argc, char** argv) {
         }
         request.context.vertex = vx;
     }
-    if (stage != "cs") request.context.floatMode = ShaderFloatMode{0xc0u, true, false, false};  // default: fp32 denorm flush, fp16/64 preserve, DX10 clamp
+    // For ps, argv[10] optionally supplies FLOAT_MODE in hex. Other stages keep their own argument layout.
+    const auto floatMode = stage == "ps" && argc > 10 ? std::stoul(argv[10], nullptr, 16) : 0xc0u;
+    if (floatMode > 0xffu) {
+        std::fprintf(stderr, "pixel FLOAT_MODE must fit in one byte\n");
+        return 2;
+    }
+    if (stage != "cs") request.context.floatMode = ShaderFloatMode{static_cast<std::uint8_t>(floatMode), true, false, false};
     if (stage == "ms") {
         // Default NGG/mesh configuration (nothing here is read from the shader): triangle list, one 128-thread group.
         GraphicsCompileContext g{};
