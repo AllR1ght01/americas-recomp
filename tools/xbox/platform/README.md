@@ -58,7 +58,7 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
 * `wave64_emulate.py <in.ll> <out.ll>` replaces 64-lane wave operations with group-shared memory and a group barrier, so a shader that would
   be pinned to `[WaveSize(64)]` runs unpinned on a 32-lane device; `lower_all.py ... --emulate` tries it first. `wave64_emulate_kernel.ll`
   with `wave64_emulate_check.py`, and `wave64_prefix_kernel.ll` with `wave64_prefix_check.py`, check it against software models
-  (64 groups x 64 lanes, GPU and WARP).
+  (64 groups x 64 lanes, GPU and WARP); the commands are under [Synthetic wave64 kernels](#synthetic-wave64-kernels).
 * `dxasm --hash-only in.ll out.dxil` assembles without validating and writes only the container hash (`dxil_hash.h`), so a partly lowered shader that still calls `@xbox.*` intrinsics can be given to a PC driver.
 * `XS_TRACE=1` makes every proxy log the first call of each forwarded slot (argument registers, caller): one run shows which Xbox-only slots a program uses.
 * 64-bit addresses: `xbox_address_table.h` is the device side of the lowering's address table (recorded buffers, reserved heap descriptors, the heap
@@ -67,6 +67,51 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
   `address_check.py check <prefix>_gpu_u0.bin <prefix>_gpu_u1.bin <threads>`. Build: `cl /nologo /EHsc /O2 /std:c++17 proxy_address_test.cpp d3d12.lib dxgi.lib`.
 
 No game files are part of this repository: the DLLs, the videos and the decoded frames stay local.
+
+## Synthetic wave64 kernels
+
+Emulation removes the native wave operations and can add 64-bit ones, so the shader flags left in the metadata no longer match what
+the shader uses. Assembling the output of `wave64_emulate.py` directly with `dxasm` fails with `Flags must match usage`
+(`declared=524304`, `actual=1048592` for `wave64_emulate_kernel.ll`, `actual=16` for `wave64_prefix_kernel.ll`). `lower_all.py`
+writes the reported value into the flags word and assembles once more; a second failure is reported, not retried.
+
+From an x64 Visual Studio developer PowerShell at the repository root. `$dxc` is any folder with the x64 `dxcompiler.dll` and
+`dxil.dll`, from DXC or the Windows SDK:
+
+```powershell
+$dxc = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64'
+$src = (Resolve-Path tools/xbox/platform).Path
+$work = Join-Path $env:TEMP ('xbox-wave64-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path "$work/input" | Out-Null
+Push-Location $work
+Copy-Item "$dxc/dxcompiler.dll", "$dxc/dxil.dll" .
+cl /nologo /EHsc /O2 /std:c++17 "$src/dxasm.cpp" /Fe:dxasm.exe
+cl /nologo /EHsc /O2 /std:c++17 "$src/dispatch_test.cpp" /Fe:dispatch_test.exe d3d12.lib dxgi.lib
+Copy-Item "$src/wave64_emulate_kernel.ll" input/shader_01.ll
+Copy-Item "$src/wave64_prefix_kernel.ll" input/shader_02.ll
+python -I "$src/lower_all.py" input out 64 "$work/dxasm.exe" --emulate
+```
+
+It prints `01 emulated; ok`, `02 emulated; ok` and `2 of 2 assembled and signed`. Then run both kernels on the GPU and WARP and
+check each readback against its software model:
+
+```powershell
+$env:DT_RAW = '1'
+$kernels = [ordered]@{ '01' = 'wave64_emulate'; '02' = 'wave64_prefix' }
+foreach ($id in $kernels.Keys) {
+    $name = $kernels[$id]
+    $env:DT_DUMP = $name
+    ./dispatch_test.exe "out/repl_$id.dxil" 64 1
+    foreach ($adapter in 'gpu', 'warp') {
+        python -I "$src/$($name)_check.py" "$($name)_$($adapter)_u0.bin" "$($name)_$($adapter)_u1.bin" 64
+    }
+}
+Remove-Item Env:DT_RAW, Env:DT_DUMP
+Pop-Location
+```
+
+Each dispatch prints `0 of 2097152 output words differ between the adapters` and each of the four checks prints
+`64 groups x 64 lanes checked; mismatches: none`.
 
 ## XMem trace test
 

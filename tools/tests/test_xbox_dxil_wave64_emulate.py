@@ -1,8 +1,14 @@
+import contextlib
+import io
 import os
+from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 PLATFORM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "xbox", "platform")
 sys.path.insert(0, PLATFORM)
@@ -44,6 +50,85 @@ def lower_of(name):
 
 
 class TestWave64Emulate(unittest.TestCase):
+    KERNELS = {"01": "wave64_emulate_kernel.ll", "02": "wave64_prefix_kernel.ll"}
+    DECLARED = 524304
+    ACTUAL = {"01": 1048592, "02": 16}
+
+    def lower_all(self, validate):
+        run = subprocess.run
+        attempts = []
+
+        def fake_run(args, **kwargs):
+            if args[0] != "dxasm.exe":
+                return run(args, **kwargs)
+            shader = Path(args[1])
+            text = shader.read_text(encoding="utf-8")
+            number = shader.stem[1:]
+            self.assertIn("@__wave64.i32", text)
+            self.assertNotIn("@dx.op.wave", text)
+            metadata = re.search(r"!\d+ = !\{i32 0, i64 (\d+), i32 4,", text)
+            self.assertIsNotNone(metadata, f"shader {number} has no flag metadata")
+            flags = int(metadata[1])
+            attempts.append((number, flags))
+            code, message = validate(number, flags)
+            return subprocess.CompletedProcess(args, code, message, "")
+
+        script = os.path.join(PLATFORM, "lower_all.py")
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = Path(directory, "inputs")
+            inputs.mkdir()
+            for number, name in self.KERNELS.items():
+                Path(inputs, f"shader_{number}.ll").write_bytes(Path(PLATFORM, name).read_bytes())
+            output = io.StringIO()
+            args = [script, str(inputs), str(Path(directory, "out")), "64", "dxasm.exe", "--emulate"]
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(sys, "path", sys.path.copy()),
+                mock.patch.object(subprocess, "run", side_effect=fake_run),
+                contextlib.redirect_stdout(output),
+            ):
+                runpy.run_path(script, run_name="__main__")
+        return attempts, output.getvalue().splitlines()
+
+    @staticmethod
+    def flags_mismatch(declared, actual):
+        return 1, f"validation failed: error: Flags must match usage.\nnote: Flags declared={declared}, actual={actual}\n"
+
+    def test_lower_all_repairs_declared_flags_and_retries_once(self):
+        def validate(number, flags):
+            if flags != self.ACTUAL[number]:
+                return self.flags_mismatch(flags, self.ACTUAL[number])
+            return 0, ""
+
+        attempts, lines = self.lower_all(validate)
+        self.assertEqual(attempts, [
+            ("01", self.DECLARED), ("01", self.ACTUAL["01"]),
+            ("02", self.DECLARED), ("02", self.ACTUAL["02"]),
+        ])
+        self.assertEqual(lines, ["01 emulated; ok", "02 emulated; ok", "2 of 2 assembled and signed"])
+
+    def test_lower_all_does_not_retry_a_second_flags_mismatch(self):
+        attempts, lines = self.lower_all(lambda number, flags: self.flags_mismatch(flags, flags + 1))
+        self.assertEqual(attempts, [
+            ("01", self.DECLARED), ("01", self.DECLARED + 1),
+            ("02", self.DECLARED), ("02", self.DECLARED + 1),
+        ])
+        self.assertEqual(lines, [
+            "01 emulated; validation: validation failed: error: Flags must match usage.",
+            "02 emulated; validation: validation failed: error: Flags must match usage.",
+            "0 of 2 assembled and signed",
+        ])
+
+    def test_lower_all_does_not_retry_other_validation_errors(self):
+        message = "validation failed: error: Instructions must be of an allowed type.\n"
+        attempts, lines = self.lower_all(lambda number, flags: (1, message))
+        self.assertEqual(attempts, [("01", self.DECLARED), ("02", self.DECLARED)])
+        self.assertEqual(lines, [
+            "01 emulated; validation: validation failed: error: Instructions must be of an allowed type.",
+            "02 emulated; validation: validation failed: error: Instructions must be of an allowed type.",
+            "0 of 2 assembled and signed",
+        ])
+
     def test_bundled_kernels_emulate_to_no_wave_operations(self):
         for name in ("wavelower_kernel.ll",):
             text, count, left = w64.emulate(lower_of(name))
