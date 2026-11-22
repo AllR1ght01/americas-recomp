@@ -1,5 +1,6 @@
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -130,23 +131,42 @@ def _readfirstlane_active_mask_pruning_shader():
     return p.bytes()
 
 
+def _split_reloads_shader(joins):
+    """ShaderMemory.cpp's splitReloads: each join reloads T# dword 7 from one of two SRT dwords or dwords 0-6 from the same SRT dwords."""
+    words = [0xF4080500, 0xFA000020, 0xF4080600, 0xFA000040, 0xF40C0200, 0xFA000000, 0xBF8CC07F]
+    for join in range(joins):
+        words += [0xBF068014, 0xBF850003, 0xF40003C0, 0xFA000088 if join % 2 == 0 else 0xFA00008C, 0xBF820006, 0xF4080200, 0xFA000060,
+                  0xF4040300, 0xFA000070, 0xF4000380, 0xFA000078]
+    words += [0xBF8CC07F, 0xF09C0F08, 0x00A20000, 0xBF8C3F70, 0xE0700000, 0x80060000, 0xBF810000]
+    return struct.pack("<%dI" % len(words), *words)
+
+
+SPLIT_RELOADS_BIND = "node 0 user 0\ndesc 0 0 img1\ndesc 0 32 buf\ndesc 0 64 buf\ndesc 0 96 img1\n"
+
+
 class DescriptorWebRecompileTest(unittest.TestCase):
-    def _compile_and_validate(self, code_bytes, bind_text):
+    def _run_driver(self, code_bytes, bind_text, env=None):
         driver = _find_driver()
         if not driver:
             self.skipTest("driver binary not built (set XBOX_DRIVER or build tools/xbox)")
-        with tempfile.TemporaryDirectory(prefix="desc_web_") as tmp:
-            code_path = Path(tmp) / "shader.bin"
-            bind_path = Path(tmp) / "shader.bind"
-            spv_path = Path(tmp) / "out.spv"
-            code_path.write_bytes(code_bytes)
-            bind_path.write_text(bind_text, encoding="utf-8")
-            proc = subprocess.run([driver, str(code_path), "32", str(spv_path), str(bind_path), "1", "cs"], capture_output=True, text=True, timeout=30)
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            val = _find_spirv_val()
-            if val:
-                vp = subprocess.run([val, "--target-env", "vulkan1.3", str(spv_path)], capture_output=True, text=True, timeout=30)
-                self.assertEqual(vp.returncode, 0, vp.stdout + vp.stderr)
+        tmp = tempfile.mkdtemp(prefix="desc_web_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code_path = Path(tmp) / "shader.bin"
+        bind_path = Path(tmp) / "shader.bind"
+        spv_path = Path(tmp) / "out.spv"
+        code_path.write_bytes(code_bytes)
+        bind_path.write_text(bind_text, encoding="utf-8")
+        proc = subprocess.run([driver, str(code_path), "32", str(spv_path), str(bind_path), "1", "cs"], capture_output=True, text=True, timeout=30,
+                              env=dict(os.environ, **(env or {})))
+        return proc, spv_path
+
+    def _compile_and_validate(self, code_bytes, bind_text):
+        proc, spv_path = self._run_driver(code_bytes, bind_text)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        val = _find_spirv_val()
+        if val:
+            vp = subprocess.run([val, "--target-env", "vulkan1.3", str(spv_path)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(vp.returncode, 0, vp.stdout + vp.stderr)
 
     def test_nested_pointer_phi_image_load(self):
         bind = (
@@ -168,6 +188,17 @@ class DescriptorWebRecompileTest(unittest.TestCase):
     def test_readfirstlane_active_mask_prunes_dead_vgpr_history(self):
         bind = "node 0 user 4\ndesc 0 16 img1\ndesc 0 48 buf\ndesc 0 64 samp\ndesc 0 80 samp\n"
         self._compile_and_validate(_readfirstlane_active_mask_pruning_shader(), bind)
+
+    def test_reloads_of_the_same_srt_dwords_share_web_states(self):
+        proc, _ = self._run_driver(_split_reloads_shader(260), SPLIT_RELOADS_BIND, {"XBOX_DUMP_ABI": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(any("kind=4" in line and "count=4 " in line for line in proc.stdout.splitlines()), proc.stdout)
+
+    def test_web_nested_past_the_depth_limit_is_refused(self):
+        proc, _ = self._run_driver(_split_reloads_shader(600), SPLIT_RELOADS_BIND)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("GetImageResource dword 0 is not a valid runtime value", proc.stdout)
+        self.assertIn("; descriptor web: nested more than 512 joins deep", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -7189,8 +7189,9 @@ void verifyDescriptorPhis() {
         return body;
     };
     require(planImages(splitReloads(8u)) == 4u, "descriptor Phi: separate reloads of T# dword 7 and dwords 0-6 were not split into their 4 T#s");
-    expectFailure([&] { static_cast<void>(planImages(splitReloads(260u))); }, "GetImageResource dword 0 is not a valid runtime value", "descriptor Phi: a web over more than 512 descriptor tuples was accepted");
-    expectFailure([&] { static_cast<void>(planImages(splitReloads(260u))); }, "; descriptor web: more than 512 descriptor states", "descriptor Phi: the failure did not name the state limit");
+    require(planImages(splitReloads(260u)) == 4u, "descriptor Phi: 260 joins whose reloads read the same SRT dwords were not merged into their 4 T#s");
+    expectFailure([&] { static_cast<void>(planImages(splitReloads(600u))); }, "GetImageResource dword 0 is not a valid runtime value", "descriptor Phi: a web nested more than 512 joins deep was accepted");
+    expectFailure([&] { static_cast<void>(planImages(splitReloads(600u))); }, "; descriptor web: nested more than 512 joins deep", "descriptor Phi: the failure did not name the depth limit");
 
     static constexpr std::array<std::uint32_t, 33> rawCode{
         0xbe8803ffu, 0x00021000u, 0xbe8903ffu, 0x03c00000u, 0xbe8a03ffu, 0x0000003fu, 0xbe8b03ffu, 0x9000003fu,
