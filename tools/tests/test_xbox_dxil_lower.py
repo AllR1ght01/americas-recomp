@@ -274,5 +274,53 @@ class XboxDxilLowerRenumberTests(unittest.TestCase):
                 self.assertLessEqual(referenced, defined)
 
 
+def wave_module(threads, body):
+    return "\n".join([
+        'define void @main() {',
+        *body,
+        '  ret void',
+        '}',
+        '!dx.entryPoints = !{!1}',
+        '!1 = !{void ()* @main, !"main", null, null, !2}',
+        '!2 = !{i32 0, i64 8388624, i32 4, !3}',
+        '!3 = !{i32 %d, i32 1, i32 1}' % threads,
+        '',
+    ])
+
+
+SWIZZLE = '  %1 = call i32 @xbox.LaneSwizzle.i32(i32 7, i32 %0, i32 30)'
+EQUAL_MASK = '  %2 = call i32 @xbox.V_CNDMASK_B32(i32 8, { i32, i32 } { i32 -858993460, i32 -858993460 }, { i32, i32 } { i32 0, i32 1 })'
+HIGH_HALF_MASK = '  %3 = call i32 @xbox.V_CNDMASK_B32(i32 9, { i32, i32 } { i32 0, i32 -1 }, { i32, i32 } { i32 0, i32 1 })'
+READ_LANE = '  %4 = call i32 @xbox.ReadLane.i32(i32 10, i32 %1, i32 31)'
+ACTIVE_SUM = '  %5 = call i32 @dx.op.waveActiveOp.i32(i32 119, i32 %1, i8 0, i8 1)'
+LANE_COUNT = '  %6 = call i32 @dx.op.waveGetLaneCount(i32 112)'
+
+
+class XboxDxilNeedsWave64Tests(unittest.TestCase):
+    def needs(self, threads, *body):
+        return lower_module.needs_wave64(wave_module(threads, list(body)))
+
+    def test_lane_local_intrinsics_do_not_need_wave64(self):
+        self.assertFalse(self.needs(512, SWIZZLE, EQUAL_MASK))
+
+    def test_mask_with_different_halves_needs_wave64(self):
+        self.assertTrue(self.needs(64, SWIZZLE, HIGH_HALF_MASK))
+
+    def test_read_lane_needs_wave64(self):
+        self.assertTrue(self.needs(64, SWIZZLE, READ_LANE))
+
+    def test_standard_wave_operation_needs_wave64(self):
+        self.assertTrue(self.needs(64, ACTIVE_SUM))
+
+    def test_group_of_32_does_not_need_wave64(self):
+        self.assertFalse(self.needs(32, SWIZZLE, HIGH_HALF_MASK, READ_LANE, ACTIVE_SUM))
+
+    def test_lane_count_needs_wave64_in_any_group(self):
+        self.assertTrue(self.needs(32, LANE_COUNT))
+
+    def test_no_wave_operation_does_not_need_wave64(self):
+        self.assertFalse(self.needs(256, '  %7 = add i32 1, 2'))
+
+
 if __name__ == "__main__":
     unittest.main()
