@@ -53,7 +53,7 @@ HRESULT XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult_impl(void*, 
                               sizeof(uint16_t), port, nullptr);
 }
 
-using PreferredPortChangedCallback = void(CALLBACK*)(void* context, uint64_t preferredLocalUdpMultiplayerPort);
+using PreferredPortChangedCallback = void(CALLBACK*)(void* context, uint16_t preferredLocalUdpMultiplayerPort);
 
 struct PortRegistration {
   void* context;
