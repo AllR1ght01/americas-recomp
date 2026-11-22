@@ -22,7 +22,10 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).
   `wine_smoke.sh <package dir> [work dir]` runs the same test on Linux under Wine: it builds `xmem.dll` and
   `bink_test.exe` with mingw-w64, copies the package's DLLs, carves one video and fails if any frame errors. Needs
-  Wine, mingw-w64 and the user's package, so it is not part of the CI tests.
+  Wine, mingw-w64 and the user's package, so it is not part of the CI tests. The `WINEDLLOVERRIDES` force native
+  `xmem`/`d3d12_xs`, so a missing DLL fails loudly instead of falling back; the Bink test loads `xmem` only (a
+  one-off `WINEDEBUG=+loaddll` run shows no `d3d12_xs`), and a synthetic D3D12.X caller is the next step for the
+  layer itself.
 
 * `xgr/idl_table.py <dir of IDLs> <table.json>` reads the interface definitions of another xgameruntime reimplementation (Xodus, LGPL-2.1; not part of this repo) and
   `xgr/gen_stub.py <table.json> <out_dir>` generates a logging stand-in `xgameruntime.dll` from it (60 interfaces, 1505 vtable slots). With `XGR_LOG=<file>` it records which

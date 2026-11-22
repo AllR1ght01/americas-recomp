@@ -12,7 +12,6 @@ done
 export LC_ALL=C TZ=UTC WINEDEBUG=-all
 export WINEPREFIX="$work/prefix"
 export WINEDLLOVERRIDES="xmem,d3d12_xs=n"
-export MESA_SHADER_CACHE_MAX_SIZE=1G
 unset RADV_DEBUG MESA_SHADER_CACHE_DISABLE || true
 
 mkdir -p "$work"
