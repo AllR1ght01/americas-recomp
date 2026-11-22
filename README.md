@@ -12,7 +12,7 @@ Can an Xbox Series game run on a PC through [AnyPS5](https://github.com/boykopov
 
 | Stage | Shaders | Valid SPIR-V | Notes |
 |---|---|---|---|
-| Compute | 2,689 | **2,679 (99.6%)** | best of four fake-memory variants (default, unbacked, tiled T#, tiled V#); 0 invalid; 6 time out, 4 throw |
+| Compute | 2,689 | **2,678 (99.6%)** | best of four fake-memory variants (default, unbacked, tiled T#, tiled V#); 0 invalid; 7 time out, 4 throw |
 | Pixel | 12,098 | **12,095 (99.97%, strict)** | no barycentric extension and no f16 opt-in needed any more (#104, #101, and the descriptor-chain work in #86, #87, #91, #94, #102); 3 throw |
 | Vertex | 2,233 | 1,445 (64.7%) | the rest need the real vertex fetch shader |
 | Mesh | 9,282 | 9,240 (99.5%) | mesh configuration is a guess |
