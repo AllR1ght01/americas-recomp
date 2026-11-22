@@ -44,7 +44,8 @@ Experimental tooling for running Xbox Series shader code through the shader reco
 3. `driver.exe <code.bin> <wave 32|64> <out.spv> [user_data_dwords]` recompiles one compute shader with stubbed
    bindings (user-data pointer pairs backed by fake buffer-descriptor memory).
    For `vs`, argument 7 is an optional vertex input table (`<idx>.vin`, written by `carve_shaders.py`, lines
-   `vin <first vgpr> <vgpr count> <input register>`): the VGPRs the runtime-built fetch subroutine fills. With it the
+   `vin <first vgpr> <vgpr count> <input register>`): the VGPRs the runtime-built fetch subroutine fills. Each record
+   occupies one line. A malformed record stops compilation with its line number. With the table the
    shader's opening `s_swappc_b64` is replaced by host vertex attribute reads (see "Vertex fetch subroutine" in
    `docs/xbox/XBOX_SHADERS.md`). The embedded-fetch analyzer is pointed at s96, outside the 16 user words, because Xbox
    shaders load no attribute tables themselves. Argument 8 (with `-` for argument 7 when there is no table) is the ESGS

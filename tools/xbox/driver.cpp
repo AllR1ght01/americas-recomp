@@ -1,5 +1,6 @@
 #include "Recompiler.hpp"
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 using namespace ShaderRecompiler;
@@ -129,13 +131,26 @@ int main(int argc, char** argv) {
         if (stage == "vs" && argc > 7 && std::string(argv[7]) != "-") {
             std::ifstream vf(argv[7]);
             if (!vf) { std::printf("THROW cannot open vertex input table %s\n", argv[7]); return 1; }
-            std::string kind;
-            while (vf >> kind) {
-                if (kind != "vin") { std::string rest; std::getline(vf, rest); continue; }
-                std::int32_t vgpr, count, attr; vf >> vgpr >> count >> attr;
-                if (vx.resourcesNum >= ShaderVertexStageInfo::MaxResources) { std::printf("THROW too many vertex inputs\n"); return 1; }
+            std::size_t lineNumber = 0;
+            for (std::string line; std::getline(vf, line);) {
+                ++lineNumber;
+                std::istringstream row(line.substr(0, line.find('#')));
+                std::string kind;
+                if (!(row >> kind) || kind != "vin") continue;
+                std::int32_t vgpr{}, count{}, attr{};
+                if (!(row >> vgpr) || !std::isspace(row.peek()) ||
+                    !(row >> count) || !std::isspace(row.peek()) ||
+                    !(row >> attr) || !(row >> std::ws).eof()) {
+                    std::printf("THROW malformed vertex input at line %zu (expected vin <first vgpr> <vgpr count> <input register>)\n", lineNumber);
+                    return 1;
+                }
+                if (vx.resourcesNum >= ShaderVertexStageInfo::MaxResources) {
+                    std::printf("THROW too many vertex inputs at line %zu\n", lineNumber);
+                    return 1;
+                }
                 vx.resourcesDst[vx.resourcesNum++] = {vgpr, count, attr, 0u};
             }
+            if (vf.bad() || !vf.eof()) { std::printf("THROW cannot read vertex input table %s\n", argv[7]); return 1; }
             if (vx.resourcesNum != 0) {
                 vx.fetchEmbedded = true;
                 vx.fetchAttribReg = 96u;

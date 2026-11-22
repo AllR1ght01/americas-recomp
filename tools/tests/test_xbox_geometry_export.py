@@ -75,7 +75,7 @@ def _export_half(item_bytes=32, fetch=False):
 
 
 class GeometryExportTest(unittest.TestCase):
-    def _run(self, program, extra):
+    def _run(self, program, extra, vin="vin 9 1 0\n"):
         driver = _find_driver()
         if not driver:
             self.skipTest("driver binary not built (set XBOX_DRIVER or build tools/xbox)")
@@ -88,7 +88,7 @@ class GeometryExportTest(unittest.TestCase):
         spv_path = Path(tmp) / "out.spv"
         vin_path = Path(tmp) / "shader.vin"
         code_path.write_bytes(program.bytes())
-        vin_path.write_text("vin 9 1 0\n", encoding="utf-8")
+        vin_path.write_bytes(vin.encode("utf-8"))
         args = [str(vin_path) if a == "VIN" else a for a in extra]
         cmd = [driver, str(code_path), "32", str(spv_path), "-", "1", "vs"] + args
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -131,6 +131,29 @@ class GeometryExportTest(unittest.TestCase):
         self.assertEqual(inputs, {0})
         self.assertEqual(outputs, {0})
         self._validate(spv)
+
+    def test_vertex_input_table_whitespace_and_comments(self):
+        proc, spv = self._run(_export_half(fetch=True), ["VIN", "8"],
+                              vin="# vertex inputs\r\n\r\n  vin\t9  1  0 # attribute zero")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._interface(spv)[2], {0})
+        self._validate(spv)
+
+    def test_malformed_vertex_input_is_rejected_on_its_own_line(self):
+        records = ("vin", "vin 9 1", "vin 9 bad 0", "vin 9 1 0junk", "vin 9+1 0", "vin 2147483648 1 0")
+        for record in records:
+            with self.subTest(record=record):
+                vin = f"# vertex inputs\n\n{record}\nvin 9 1 0\n"
+                proc, spv = self._run(_export_half(fetch=True), ["VIN", "8"], vin=vin)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn("THROW malformed vertex input at line 3", proc.stdout)
+                self.assertFalse(spv.exists())
+
+    def test_excess_vertex_inputs_report_the_first_over_limit_line(self):
+        proc, spv = self._run(_export_half(fetch=True), ["VIN", "8"], vin="vin 9 1 0\n" * 33)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("THROW too many vertex inputs at line 33", proc.stdout)
+        self.assertFalse(spv.exists())
 
     def test_item_stride_must_match_the_geometry_configuration(self):
         proc, _ = self._run(_export_half(item_bytes=16), ["-", "8"])
