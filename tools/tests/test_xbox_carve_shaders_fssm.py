@@ -143,5 +143,26 @@ class CarveFssmTest(unittest.TestCase):
             self.assertEqual(row["error"], "")
 
 
+class TrimAtEndpgmTest(unittest.TestCase):
+    def test_trims_after_the_last_endpgm(self):
+        code = struct.pack("<4I", 0x11111111, END_PGM, 0x22222222, 0x33333333)
+        self.assertEqual(carve_shaders.trim_at_endpgm(code), code[:8])
+
+    def test_trailing_partial_word_does_not_hide_an_aligned_endpgm(self):
+        for tail in (b"\x00", b"\x00\x00", b"\x00\x00\x00"):
+            with self.subTest(tail=len(tail)):
+                code = struct.pack("<3I", 0x11111111, END_PGM, 0x22222222) + tail
+                self.assertEqual(carve_shaders.trim_at_endpgm(code), code[:8])
+
+    def test_endpgm_bytes_at_an_unaligned_offset_do_not_match(self):
+        code = b"\x00\x00" + struct.pack("<I", END_PGM) + b"\x00\x00\x00"
+        self.assertEqual(carve_shaders.trim_at_endpgm(code), code)
+
+    def test_code_shorter_than_a_word_is_kept(self):
+        for code in (b"", b"\x00\x00\x81"):
+            with self.subTest(size=len(code)):
+                self.assertEqual(carve_shaders.trim_at_endpgm(code), code)
+
+
 if __name__ == "__main__":
     unittest.main()

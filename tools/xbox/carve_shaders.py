@@ -132,7 +132,7 @@ def strip_prologue(code):
 
 
 def trim_at_endpgm(code):
-    for offset in range(len(code) - 4, -1, -4):
+    for offset in range(len(code) // 4 * 4 - 4, -1, -4):
         if struct.unpack_from("<I", code, offset)[0] == END_PGM:
             return code[: offset + 4]
     return code
