@@ -535,7 +535,11 @@ int main(int argc, char** argv) {
         request.target.vulkanVersion = 0x00403000u;
         const bool computeSizes = (dev.subgroup.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
         const auto fits = [&](std::uint32_t size) { return computeSizes ? size >= dev.subgroup.minSubgroupSize && size <= dev.subgroup.maxSubgroupSize : size == dev.nativeSubgroupSize; };
-        std::uint32_t hostSubgroup = graphics ? dev.nativeSubgroupSize : fits(wave) ? wave : wave == 64u && fits(32u) ? 32u : wave;
+        std::uint32_t hostSubgroup = graphics ? dev.nativeSubgroupSize : wave;
+        if (!graphics && !fits(wave)) {
+            if (wave == 32u && fits(64u)) hostSubgroup = 64u;
+            if (wave == 64u && fits(32u)) hostSubgroup = 32u;
+        }
         if (const char* forced = std::getenv("XBOX_HOST_SUBGROUP")) {
             const auto size = Num(forced);
             if (pixel && size != dev.nativeSubgroupSize &&
