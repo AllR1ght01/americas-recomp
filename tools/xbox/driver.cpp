@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
     std::map<std::uint32_t, Node> nodes;
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> bufferBacking;  // zeroed memory behind each fake V# base
     std::map<std::pair<std::uint32_t, std::uint32_t>, int> descs;  // (node,offset) -> class, higher wins: img 3 > buf 2 > samp 1
+    std::map<std::pair<std::uint32_t, std::uint32_t>, bool> bufImgCollisions;
+    std::uint64_t counter = 0;
     if (argc > 4) {
         std::ifstream bf(argv[4]);
         std::string kind;
@@ -44,8 +46,10 @@ int main(int argc, char** argv) {
                 std::uint32_t id, off; std::string cls; bf >> id >> off >> cls;
                 const int rank = cls.rfind("img",0)==0 ? 3 : cls == "buf" ? 2 : 1;
                 auto& slot = descs[{id, off}];
+                const int prevRank = slot & 0xff;
+                if ((prevRank == 3 && rank == 2) || (prevRank == 2 && rank == 3)) bufImgCollisions[{id, off}] = true;
                 const int atomicBit = (rank == 3 && cls.back() == 'a') ? 0x1000 : (rank == 3 && cls.back() == 'b') ? 0x3000 : 0;  // class "img<dim>a": used by an atomic image op
-                if (rank > (slot & 0xff)) slot = rank | (rank == 3 ? (cls[3]-'0') << 8 : 0) | atomicBit;
+                if (rank > prevRank) slot = rank | (rank == 3 ? (cls[3]-'0') << 8 : 0) | atomicBit;
                 else slot |= atomicBit;
             }
         }
@@ -55,7 +59,6 @@ int main(int argc, char** argv) {
                 nodes[static_cast<std::uint32_t>(n.parent)].mem[n.off / 4 + 1] = 0;
             }
         }
-        std::uint64_t counter = 0;
         for (auto& [key, rank] : descs) {
             
             auto it = nodes.find(key.first);
@@ -195,8 +198,7 @@ int main(int argc, char** argv) {
     request.target.maxWorkgroupSharedMemoryBytes = 65536;
     request.layout = {0, 0, 0, 128};
     request.useCache = false;
-    try {
-        const auto result = Recompile(request);
+    const auto writeOutput = [&](const RecompileResult& result) -> int {
         if (result.spirv.empty()) { std::printf("EMPTY\n"); return 1; }
         std::ofstream o(argv[3], std::ios::binary);
         const auto words = result.spirv.Words();
@@ -207,10 +209,44 @@ int main(int argc, char** argv) {
         }
         std::printf("OK %zu\n", words.size());
         return 0;
-    } catch (const std::exception& e) {
+    };
+    const auto reportError = [](const std::exception& e) -> int {
         std::string m = e.what();
         for (auto& c : m) if (c == '\n' || c == '\r') c = ' ';
         std::printf("THROW %s\n", m.c_str());
         return 1;
+    };
+    try {
+        return writeOutput(Recompile(request));
+    } catch (const std::exception& e) {
+        if (variant == 1 && !bufImgCollisions.empty() && std::string_view(e.what()).find("buffer descriptor uses an unsupported type") != std::string_view::npos) {
+            const std::size_t existingBackings = bufferBacking.size();
+            for (std::size_t i = 0; i < existingBackings; ++i) {
+                if (!bufferBacking[i].second.empty()) bufferBacking[i].second[0] = 1u;
+            }
+            for (const auto& [key, collided] : bufImgCollisions) {
+                if (!collided) continue;
+                auto it = nodes.find(key.first);
+                if (it == nodes.end()) continue;
+                auto& m = it->second.mem;
+                const std::size_t w = key.second / 4;
+                if (w + 12 <= m.size() && m[w + 8] == 0u && m[w + 11] == 0u) {
+                    const std::uint64_t bbase = 0x50000000ull + 0x10000ull * counter++;
+                    const std::uint32_t v[4] = {static_cast<std::uint32_t>(bbase), static_cast<std::uint32_t>((bbase >> 32) & 0xffffu) | (16u << 16), 0x10000u, 0x30027facu};
+                    std::copy(v, v + 4, m.begin() + w + 8);
+                    bufferBacking.push_back({bbase, std::vector<std::uint32_t>(0x4000)});
+                }
+            }
+            regions.clear();
+            for (auto& [id, n] : nodes) regions.push_back({n.base, std::as_bytes(std::span<const std::uint32_t>(n.mem))});
+            for (auto& [base, mem] : bufferBacking) regions.push_back({base, std::as_bytes(std::span<const std::uint32_t>(mem))});
+            request.context.memory = MemoryRegionView(std::span<const MemoryRegion>(regions));
+            try {
+                return writeOutput(Recompile(request));
+            } catch (const std::exception& retryError) {
+                return reportError(retryError);
+            }
+        }
+        return reportError(e);
     }
 }
