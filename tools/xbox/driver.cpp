@@ -257,7 +257,35 @@ int main(int argc, char** argv) {
             try {
                 return writeOutput(Recompile(request));
             } catch (const std::exception& retryError) {
-                return reportError(retryError);
+                if (std::string_view(retryError.what()).find("buffer descriptor uses an unsupported type") == std::string_view::npos) {
+                    return reportError(retryError);
+                }
+                for (std::size_t i = 0; i < existingBackings; ++i) {
+                    if (!bufferBacking[i].second.empty()) bufferBacking[i].second[0] = 0u;
+                }
+                for (const auto& [key, collided] : bufImgCollisions) {
+                    if (!collided) continue;
+                    auto it = nodes.find(key.first);
+                    if (it == nodes.end()) continue;
+                    auto& m = it->second.mem;
+                    const std::size_t w = key.second / 4;
+                    if (w + 8 <= m.size()) {
+                        const std::uint64_t bbase = 0x50000000ull + 0x10000ull * counter++;
+                        const std::uint32_t v[4] = {static_cast<std::uint32_t>(bbase), static_cast<std::uint32_t>((bbase >> 32) & 0xffffu) | (16u << 16), 0x10000u, 0x30027facu};
+                        std::copy(v, v + 4, m.begin() + w);
+                        std::fill(m.begin() + w + 4, m.begin() + w + 8, 0u);
+                        bufferBacking.push_back({bbase, std::vector<std::uint32_t>(0x4000)});
+                    }
+                }
+                regions.clear();
+                for (auto& [id, n] : nodes) regions.push_back({n.base, std::as_bytes(std::span<const std::uint32_t>(n.mem))});
+                for (auto& [base, mem] : bufferBacking) regions.push_back({base, std::as_bytes(std::span<const std::uint32_t>(mem))});
+                request.context.memory = MemoryRegionView(std::span<const MemoryRegion>(regions));
+                try {
+                    return writeOutput(Recompile(request));
+                } catch (const std::exception& secondRetryError) {
+                    return reportError(secondRetryError);
+                }
             }
         }
         return reportError(e);
