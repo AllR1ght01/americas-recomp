@@ -188,28 +188,28 @@ def main():
     arguments = parser.parse_args()
 
     bins = os.path.join(arguments.out, "bins")
-    managed = (
-        sorted(name for name in os.listdir(bins) if MANAGED.fullmatch(name))
-        if os.path.isdir(bins)
-        else []
-    )
-    if managed and not arguments.force:
+    vins = os.path.join(arguments.out, "vin")
+    manifest = os.path.join(arguments.out, "manifest.csv")
+    managed = [
+        os.path.join(directory, name)
+        for directory, pattern in ((bins, MANAGED), (vins, MANAGED_VIN))
+        if os.path.isdir(directory)
+        for name in sorted(os.listdir(directory))
+        if pattern.fullmatch(name)
+    ]
+    if not arguments.force and (managed or os.path.lexists(manifest)):
         parser.error(
-            "%s already holds %d carved blobs; pass --force to replace them"
-            % (bins, len(managed))
+            "%s already holds carved output; pass --force to replace it"
+            % arguments.out
         )
     with open(arguments.archive, "rb") as handle, mmap.mmap(
         handle.fileno(), 0, access=mmap.ACCESS_READ
     ) as archive:
         entries = find_entries(archive)
         os.makedirs(bins, exist_ok=True)
-        for name in managed:
-            os.remove(os.path.join(bins, name))
-        vins = os.path.join(arguments.out, "vin")
         os.makedirs(vins, exist_ok=True)
-        for name in os.listdir(vins):
-            if MANAGED_VIN.fullmatch(name):
-                os.remove(os.path.join(vins, name))
+        for path in managed:
+            os.remove(path)
         print("names found:", len(entries), flush=True)
         rows = []
         errors = collections.Counter()
@@ -248,7 +248,7 @@ def main():
                 }
             )
 
-    with open(os.path.join(arguments.out, "manifest.csv"), "w", newline="") as handle:
+    with open(manifest, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(rows)
