@@ -276,21 +276,28 @@ static void CheckConnectivityUnregisterWhileRunning() {
   bool running = hr == S_OK && WaitForSingleObject(b.entered, 5000) == WAIT_OBJECT_0;
   Check(running && unreg(net.self, token, FALSE) == 0,
         "XNetworkingUnregisterConnectivityHintChanged(wait=false) during the callback returns false (documented: pending)");
-  Check(unreg(net.self, token, FALSE) == 1 && b.calls == 1,
-        "XNetworkingUnregisterConnectivityHintChanged: a pending token is already removed, a second call returns true");
+  Check(unreg(net.self, token, FALSE) == 0,
+        "XNetworkingUnregisterConnectivityHintChanged: polling a pending token keeps returning false while the callback runs");
   SetEvent(b.release);
+  BOOLEAN done = 0;
+  for (int i = 0; i < 500 && !done; ++i) {
+    done = unreg(net.self, token, FALSE);
+    if (!done) Sleep(10);
+  }
+  Check(done == 1 && b.calls == 1, "XNetworkingUnregisterConnectivityHintChanged: polling returns true once the callback has returned");
 
   ResetEvent(b.release);
   Token second{};
   hr = reg(net.self, nullptr, &b, reinterpret_cast<void*>(&BlockingHint), &second);
   running = hr == S_OK && WaitForSingleObject(b.entered, 5000) == WAIT_OBJECT_0;
+  running = running && unreg(net.self, second, FALSE) == 0;
   UnregisterCall call{unreg, net.self, second, 2};
   HANDLE thread = CreateThread(nullptr, 0, &UnregisterAndWait, &call, 0, nullptr);
   bool blocked = thread && WaitForSingleObject(thread, 200) == WAIT_TIMEOUT;
   SetEvent(b.release);
   bool finished = thread && WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0;
   Check(running && blocked && finished && call.result == 1,
-        "XNetworkingUnregisterConnectivityHintChanged(wait=true) blocks until the running callback returns, then returns true");
+        "XNetworkingUnregisterConnectivityHintChanged(wait=true) after a pending wait=false still blocks until the callback returns");
   if (thread) CloseHandle(thread);
   CloseHandle(b.entered);
   CloseHandle(b.release);

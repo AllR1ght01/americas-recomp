@@ -184,21 +184,29 @@ static void CheckPortUnregisterWhileRunning() {
   bool running = hr == S_OK && WaitForSingleObject(b.entered, 5000) == WAIT_OBJECT_0;
   Check(running && unreg(g_net.self, token, FALSE) == 0,
         "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(wait=false) during the callback returns false (documented: pending)");
-  Check(unreg(g_net.self, token, FALSE) == 1 && b.calls == 1,
-        "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged: a pending token is already removed, a second call returns true");
+  Check(unreg(g_net.self, token, FALSE) == 0,
+        "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged: polling a pending token keeps returning false while the callback runs");
   SetEvent(b.release);
+  BOOLEAN done = 0;
+  for (int i = 0; i < 500 && !done; ++i) {
+    done = unreg(g_net.self, token, FALSE);
+    if (!done) Sleep(10);
+  }
+  Check(done == 1 && b.calls == 1,
+        "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged: polling returns true once the callback has returned");
 
   ResetEvent(b.release);
   Token second{};
   hr = reg(g_net.self, nullptr, &b, reinterpret_cast<void*>(&BlockingPortChanged), &second);
   running = hr == S_OK && WaitForSingleObject(b.entered, 5000) == WAIT_OBJECT_0;
+  running = running && unreg(g_net.self, second, FALSE) == 0;
   UnregisterCall call{unreg, g_net.self, second, 2};
   HANDLE thread = CreateThread(nullptr, 0, &UnregisterAndWait, &call, 0, nullptr);
   bool blocked = thread && WaitForSingleObject(thread, 200) == WAIT_TIMEOUT;
   SetEvent(b.release);
   bool finished = thread && WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0;
   Check(running && blocked && finished && call.result == 1,
-        "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(wait=true) blocks until the running callback returns, then returns true");
+        "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(wait=true) after a pending wait=false still blocks until the callback returns");
   if (thread) CloseHandle(thread);
   CloseHandle(b.entered);
   CloseHandle(b.release);
